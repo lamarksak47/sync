@@ -376,7 +376,7 @@ loguru==0.7.2
 Jinja2==3.1.2
 MarkupSafe==2.1.3
 WTForms==3.1.0
-Flask-WTF==1.2.14
+Flask-WTF==1.2.1
 # Security
 cryptography==41.0.7
 bcrypt==4.1.2
