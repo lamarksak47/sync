@@ -493,17 +493,113 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Instalar dependências do sistema
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    libmariadb-dev \
-    libssl-dev \
-    libffi-dev \
-    ffmpeg \
-    curl \
-    wget \
-    gnupg \
-    && rm -rf /var/lib/apt/lists/*
+install_system_dependencies() {
+    print_step "Instalando dependências do sistema..."
+    
+    if [ "$OS_TYPE" = "debian" ]; then
+        apt-get update
+        apt-get install -y \
+            python3 \
+            python3-pip \
+            python3-venv \
+            python3-dev \
+            build-essential \
+            nginx \
+            redis-server \
+            mysql-server \
+            mysql-client \
+            libmariadb-dev \
+            libssl-dev \
+            libffi-dev \
+            ffmpeg \
+            git \
+            curl \
+            wget \
+            htop \
+            net-tools \
+            supervisor \
+            ufw \
+            cron \
+            logrotate \
+            zip \
+            unzip \
+            pv \
+            jq \
+            tree
+        
+        # Iniciar serviços
+        systemctl start mysql redis-server nginx
+        
+        # Habilitar apenas os serviços que existem
+        if systemctl list-unit-files | grep -q "^mysql.service"; then
+            systemctl enable mysql
+        else
+            print_warning "Serviço mysql.service não encontrado, pulando habilitação"
+        fi
+        
+        if systemctl list-unit-files | grep -q "^nginx.service"; then
+            systemctl enable nginx
+        else
+            print_warning "Serviço nginx.service não encontrado, pulando habilitação"
+        fi
+        
+        # Para Redis, usamos o nome correto do serviço
+        if systemctl list-unit-files | grep -q "^redis-server.service"; then
+            systemctl enable redis-server
+        elif systemctl list-unit-files | grep -q "^redis.service"; then
+            systemctl enable redis
+        else
+            print_warning "Serviço Redis não encontrado, tentando habilitar redis-server"
+            systemctl enable redis-server 2>/dev/null || true
+        fi
+        
+    elif [ "$OS_TYPE" = "rhel" ]; then
+        yum update -y
+        yum install -y \
+            python3 \
+            python3-pip \
+            python3-devel \
+            nginx \
+            redis \
+            mariadb-server \
+            mariadb-devel \
+            openssl-devel \
+            gcc \
+            gcc-c++ \
+            make \
+            ffmpeg \
+            ffmpeg-devel \
+            git \
+            curl \
+            wget \
+            htop \
+            net-tools \
+            supervisor \
+            firewalld \
+            cronie \
+            logrotate \
+            zip \
+            unzip \
+            pv \
+            jq \
+            tree
+        
+        # Iniciar serviços
+        systemctl start mariadb redis nginx firewalld
+        
+        # Habilitar serviços
+        systemctl enable mariadb nginx firewalld
+        
+        # Verificar e habilitar Redis se existir
+        if systemctl list-unit-files | grep -q "^redis.service"; then
+            systemctl enable redis
+        else
+            print_warning "Serviço Redis não encontrado no RHEL"
+        fi
+    fi
+    
+    print_success "Dependências do sistema instaladas"
+}
 
 # Copiar requirements
 COPY requirements.txt .
@@ -2811,15 +2907,71 @@ install_system_dependencies() {
 setup_database() {
     print_step "Configurando banco de dados..."
     
-    # MySQL/MariaDB
-    if [ "$OS_TYPE" = "debian" ]; then
-        mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_PASSWORD}';" 2>/dev/null || true
+    # Verificar se MySQL/MariaDB está rodando
+    if ! systemctl is-active --quiet mysql mariadb; then
+        print_warning "MySQL/MariaDB não está rodando, tentando iniciar..."
+        
+        if systemctl start mysql 2>/dev/null; then
+            print_success "MySQL iniciado"
+        elif systemctl start mariadb 2>/dev/null; then
+            print_success "MariaDB iniciado"
+        else
+            print_error "Não foi possível iniciar MySQL/MariaDB"
+            return 1
+        fi
     fi
     
-    mysql -e "CREATE DATABASE IF NOT EXISTS vod_sync CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-    mysql -e "CREATE USER IF NOT EXISTS 'vod_sync'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';"
-    mysql -e "GRANT ALL PRIVILEGES ON vod_sync.* TO 'vod_sync'@'localhost';"
-    mysql -e "FLUSH PRIVILEGES;"
+    # Para sistemas Debian/Ubuntu, definir senha do root se não estiver definida
+    if [ "$OS_TYPE" = "debian" ]; then
+        # Verificar se já existe senha para root
+        if mysql -u root -e "SELECT 1" 2>/dev/null; then
+            print_info "Senha root do MySQL já está configurada"
+        else
+            print_info "Configurando senha root do MySQL..."
+            mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_PASSWORD}';" 2>/dev/null || \
+            mysql -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('${DB_PASSWORD}');" 2>/dev/null || \
+            print_warning "Não foi possível configurar senha root, continuando..."
+        fi
+    fi
+    
+    # Criar banco de dados
+    if mysql -u root -p"${DB_PASSWORD}" -e "CREATE DATABASE IF NOT EXISTS vod_sync CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null; then
+        print_success "Banco de dados criado"
+    elif mysql -u root -e "CREATE DATABASE IF NOT EXISTS vod_sync CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null; then
+        print_success "Banco de dados criado (sem senha)"
+    else
+        print_error "Erro ao criar banco de dados"
+        return 1
+    fi
+    
+    # Criar usuário
+    if mysql -u root -p"${DB_PASSWORD}" -e "CREATE USER IF NOT EXISTS 'vod_sync'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';" 2>/dev/null; then
+        print_success "Usuário criado"
+    elif mysql -u root -e "CREATE USER IF NOT EXISTS 'vod_sync'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';" 2>/dev/null; then
+        print_success "Usuário criado (sem senha)"
+    else
+        print_error "Erro ao criar usuário"
+        return 1
+    fi
+    
+    # Conceder privilégios
+    if mysql -u root -p"${DB_PASSWORD}" -e "GRANT ALL PRIVILEGES ON vod_sync.* TO 'vod_sync'@'localhost';" 2>/dev/null; then
+        print_success "Privilégios concedidos"
+    elif mysql -u root -e "GRANT ALL PRIVILEGES ON vod_sync.* TO 'vod_sync'@'localhost';" 2>/dev/null; then
+        print_success "Privilégios concedidos (sem senha)"
+    else
+        print_error "Erro ao conceder privilégios"
+        return 1
+    fi
+    
+    # Atualizar privilégios
+    if mysql -u root -p"${DB_PASSWORD}" -e "FLUSH PRIVILEGES;" 2>/dev/null; then
+        print_success "Privilégios atualizados"
+    elif mysql -u root -e "FLUSH PRIVILEGES;" 2>/dev/null; then
+        print_success "Privilégios atualizados (sem senha)"
+    else
+        print_warning "Não foi possível atualizar privilégios"
+    fi
     
     print_success "Banco de dados configurado"
 }
@@ -2847,16 +2999,40 @@ setup_python_env() {
 setup_system_services() {
     print_step "Configurando serviços systemd..."
     
-    # Copiar arquivos de serviço
-    cp "$INSTALL_DIR/systemd/"*.service /etc/systemd/system/
+    # Copiar arquivos de serviço se existirem
+    if [ -f "$INSTALL_DIR/systemd/vod-sync.service" ]; then
+        cp "$INSTALL_DIR/systemd/vod-sync.service" /etc/systemd/system/
+        print_info "Serviço vod-sync copiado"
+    fi
+    
+    if [ -f "$INSTALL_DIR/systemd/vod-sync-celery.service" ]; then
+        cp "$INSTALL_DIR/systemd/vod-sync-celery.service" /etc/systemd/system/
+        print_info "Serviço vod-sync-celery copiado"
+    fi
+    
+    if [ -f "$INSTALL_DIR/systemd/vod-sync-celerybeat.service" ]; then
+        cp "$INSTALL_DIR/systemd/vod-sync-celerybeat.service" /etc/systemd/system/
+        print_info "Serviço vod-sync-celerybeat copiado"
+    fi
     
     # Recarregar systemd
     systemctl daemon-reload
     
-    # Habilitar serviços
-    systemctl enable vod-sync.service
-    systemctl enable vod-sync-celery.service
-    systemctl enable vod-sync-celerybeat.service
+    # Habilitar serviços (não iniciar ainda)
+    if [ -f /etc/systemd/system/vod-sync.service ]; then
+        systemctl enable vod-sync.service
+        print_info "Serviço vod-sync habilitado"
+    fi
+    
+    if [ -f /etc/systemd/system/vod-sync-celery.service ]; then
+        systemctl enable vod-sync-celery.service
+        print_info "Serviço vod-sync-celery habilitado"
+    fi
+    
+    if [ -f /etc/systemd/system/vod-sync-celerybeat.service ]; then
+        systemctl enable vod-sync-celerybeat.service
+        print_info "Serviço vod-sync-celerybeat habilitado"
+    fi
     
     print_success "Serviços systemd configurados"
 }
@@ -3276,6 +3452,9 @@ main_installation() {
     
     # Verificar sistema
     check_system
+    
+    # Verificar serviços antes de instalar
+    check_and_fix_services
     
     # Criar estrutura
     create_directories
