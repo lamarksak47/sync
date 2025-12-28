@@ -114,7 +114,7 @@ create_config_files() {
     print_step "Criando arquivos de configuração..."
     
     # Arquivo .env
-    cat > $INSTALL_DIR/.env << EOF
+    cat > "$INSTALL_DIR/.env" << EOF
 # ============================================
 # CONFIGURAÇÕES DO SISTEMA VOD SYNC XUI
 # ============================================
@@ -187,7 +187,7 @@ ALLOWED_IPS=*
 EOF
 
     # Arquivo config.yaml
-    cat > $INSTALL_DIR/config/config.yaml << EOF
+    cat > "$INSTALL_DIR/config/config.yaml" << EOF
 # Configuração do Sistema VOD Sync XUI
 
 database:
@@ -282,7 +282,7 @@ api:
 EOF
 
     # Arquivo requirements.txt
-    cat > $INSTALL_DIR/requirements.txt << EOF
+    cat > "$INSTALL_DIR/requirements.txt" << EOF
 # Core
 Flask==2.3.3
 Werkzeug==2.3.7
@@ -347,7 +347,7 @@ cryptography==41.0.5
 EOF
 
     # Arquivo docker-compose.yml
-    cat > $INSTALL_DIR/docker-compose.yml << EOF
+    cat > "$INSTALL_DIR/docker-compose.yml" << EOF
 version: '3.8'
 
 services:
@@ -487,7 +487,7 @@ networks:
 EOF
 
     # Arquivo Dockerfile
-    cat > $INSTALL_DIR/Dockerfile << EOF
+    cat > "$INSTALL_DIR/Dockerfile" << EOF
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -527,7 +527,8 @@ CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "--threads", "2", "
 EOF
 
     # Arquivo Nginx
-    cat > $INSTALL_DIR/config/nginx.conf << EOF
+    mkdir -p "$INSTALL_DIR/config"
+    cat > "$INSTALL_DIR/config/nginx.conf" << EOF
 # Configuração Nginx para VOD Sync XUI
 
 user www-data;
@@ -696,7 +697,7 @@ create_system_files() {
     print_step "Criando arquivos do sistema..."
     
     # Serviço systemd principal
-    cat > $INSTALL_DIR/systemd/vod-sync.service << EOF
+    cat > "$INSTALL_DIR/systemd/vod-sync.service" << EOF
 [Unit]
 Description=VOD Sync XUI Service
 Documentation=https://github.com/seu-repositorio/vod-sync-xui
@@ -752,7 +753,7 @@ WantedBy=multi-user.target
 EOF
 
     # Serviço Celery
-    cat > $INSTALL_DIR/systemd/vod-sync-celery.service << EOF
+    cat > "$INSTALL_DIR/systemd/vod-sync-celery.service" << EOF
 [Unit]
 Description=Celery Service for VOD Sync XUI
 Documentation=https://docs.celeryq.dev/
@@ -780,7 +781,7 @@ WantedBy=multi-user.target
 EOF
 
     # Serviço Celery Beat
-    cat > $INSTALL_DIR/systemd/vod-sync-celerybeat.service << EOF
+    cat > "$INSTALL_DIR/systemd/vod-sync-celerybeat.service" << EOF
 [Unit]
 Description=Celery Beat Service for VOD Sync XUI
 Documentation=https://docs.celeryq.dev/
@@ -832,7 +833,7 @@ create_source_code() {
     print_step "Criando código fonte da aplicação..."
     
     # Criar __init__.py
-    cat > $INSTALL_DIR/src/__init__.py << EOF
+    cat > "$INSTALL_DIR/src/__init__.py" << EOF
 """
 VOD Sync XUI - Sistema de Sincronização de VODs para XUI One
 """
@@ -843,7 +844,7 @@ __license__ = 'MIT'
 EOF
 
     # Criar app.py principal
-    cat > $INSTALL_DIR/src/app.py << 'EOF'
+    cat > "$INSTALL_DIR/src/app.py" << EOF
 #!/usr/bin/env python3
 """
 Aplicação principal do Sistema VOD Sync XUI
@@ -853,7 +854,7 @@ import os
 import sys
 import logging
 from datetime import datetime
-from flask import Flask, render_template, jsonify, request, session, send_file
+from flask import Flask, render_template, jsonify, request, send_file
 from flask_socketio import SocketIO
 from flask_login import LoginManager, current_user, login_required
 from flask_cors import CORS
@@ -1089,7 +1090,7 @@ if __name__ == '__main__':
 EOF
 
     # Criar config.py
-    cat > $INSTALL_DIR/src/config.py << 'EOF'
+    cat > "$INSTALL_DIR/src/config.py" << EOF
 """
 Configuração do Sistema VOD Sync XUI
 """
@@ -1322,8 +1323,8 @@ config = Config()
 EOF
 
     # Criar models
-    mkdir -p $INSTALL_DIR/src/models
-    cat > $INSTALL_DIR/src/models/__init__.py << EOF
+    mkdir -p "$INSTALL_DIR/src/models"
+    cat > "$INSTALL_DIR/src/models/__init__.py" << EOF
 """
 Models do Sistema VOD Sync XUI
 """
@@ -1341,7 +1342,7 @@ __all__ = [
 ]
 EOF
 
-    cat > $INSTALL_DIR/src/models/user.py << 'EOF'
+    cat > "$INSTALL_DIR/src/models/user.py" << EOF
 """
 Model de Usuário
 """
@@ -1391,7 +1392,7 @@ class User(db.Model, UserMixin):
         return f'<User {self.username}>'
 EOF
 
-    cat > $INSTALL_DIR/src/models/vod.py << 'EOF'
+    cat > "$INSTALL_DIR/src/models/vod.py" << EOF
 """
 Models de VOD
 """
@@ -1515,16 +1516,11 @@ class VOD(db.Model):
         return f'<VOD {self.title}>'
 EOF
 
-    # Criar mais models, services, etc...
-    # [Continuação do código seria muito extensa para mostrar tudo aqui]
-    # Vou criar um resumo dos principais arquivos:
-
+    # Criar estrutura básica do código
     print_info "Criando estrutura básica do código..."
     
-    # Criar arquivos principais de forma resumida
-    create_basic_structure() {
-        # database.py
-        cat > $INSTALL_DIR/src/database.py << 'EOF'
+    # database.py
+    cat > "$INSTALL_DIR/src/database.py" << EOF
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import declarative_base
 
@@ -1536,9 +1532,9 @@ def init_db():
     db.create_all()
 EOF
 
-        # services/sync_service.py
-        mkdir -p $INSTALL_DIR/src/services
-        cat > $INSTALL_DIR/src/services/sync_service.py << 'EOF'
+    # services/sync_service.py
+    mkdir -p "$INSTALL_DIR/src/services"
+    cat > "$INSTALL_DIR/src/services/sync_service.py" << EOF
 class VODSyncService:
     """Serviço de sincronização de VODs"""
     def __init__(self, config):
@@ -1555,8 +1551,8 @@ class VODSyncService:
         pass
 EOF
 
-        # services/monitoring.py
-        cat > $INSTALL_DIR/src/services/monitoring.py << 'EOF'
+    # services/monitoring.py
+    cat > "$INSTALL_DIR/src/services/monitoring.py" << EOF
 import psutil
 import datetime
 
@@ -1625,9 +1621,9 @@ class SystemMonitor:
         }
 EOF
 
-        # utils/helpers.py
-        mkdir -p $INSTALL_DIR/src/utils
-        cat > $INSTALL_DIR/src/utils/helpers.py << 'EOF'
+    # utils/helpers.py
+    mkdir -p "$INSTALL_DIR/src/utils"
+    cat > "$INSTALL_DIR/src/utils/helpers.py" << EOF
 import socket
 
 def get_ip_address():
@@ -1642,10 +1638,10 @@ def get_ip_address():
         return "127.0.0.1"
 EOF
 
-        # API e Auth
-        mkdir -p $INSTALL_DIR/src/api $INSTALL_DIR/src/auth
-        
-        cat > $INSTALL_DIR/src/api/__init__.py << 'EOF'
+    # API e Auth
+    mkdir -p "$INSTALL_DIR/src/api" "$INSTALL_DIR/src/auth"
+    
+    cat > "$INSTALL_DIR/src/api/__init__.py" << EOF
 from flask import Blueprint
 
 api_bp = Blueprint('api', __name__)
@@ -1653,17 +1649,14 @@ api_bp = Blueprint('api', __name__)
 from . import routes
 EOF
 
-        cat > $INSTALL_DIR/src/auth/__init__.py << 'EOF'
+    cat > "$INSTALL_DIR/src/auth/__init__.py" << EOF
 from flask import Blueprint
 
 auth_bp = Blueprint('auth', __name__)
 
 from . import routes
 EOF
-    }
-    
-    create_basic_structure
-    
+
     print_success "Código fonte criado"
 }
 
@@ -1672,7 +1665,7 @@ create_dashboard() {
     print_step "Criando dashboard web..."
     
     # Base template
-    cat > $INSTALL_DIR/dashboard/templates/base.html << 'EOF'
+    cat > "$INSTALL_DIR/dashboard/templates/base.html" << EOF
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -1828,12 +1821,12 @@ create_dashboard() {
                              type === 'error' ? 'alert-danger' : 
                              type === 'warning' ? 'alert-warning' : 'alert-info';
             
-            const alert = `
-                <div class="alert ${alertClass} alert-dismissible fade show" role="alert">
-                    ${message}
+            const alert = \`
+                <div class="alert \${alertClass} alert-dismissible fade show" role="alert">
+                    \${message}
                     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
                 </div>
-            `;
+            \`;
             
             $('#notification-area').append(alert);
             
@@ -1848,7 +1841,7 @@ create_dashboard() {
 EOF
 
     # Dashboard principal
-    cat > $INSTALL_DIR/dashboard/templates/dashboard.html << 'EOF'
+    cat > "$INSTALL_DIR/dashboard/templates/dashboard.html" << EOF
 {% extends "base.html" %}
 
 {% block title %}Dashboard - VOD Sync XUI{% endblock %}
@@ -2077,40 +2070,40 @@ let lastNetUp = 0;
 let lastNetDown = 0;
 
 function updateStats() {
-    $.get('/api/system/stats', function(data) {
+    \$.get('/api/system/stats', function(data) {
         // CPU
-        $('#cpu-percent').text(data.cpu.percent.toFixed(1) + '%');
-        $('#cpu-bar').css('width', data.cpu.percent + '%');
-        $('#cpu-info').text(`Cores: ${data.cpu.cores} | Freq: ${data.cpu.frequency.toFixed(0)} MHz`);
+        \$('#cpu-percent').text(data.cpu.percent.toFixed(1) + '%');
+        \$('#cpu-bar').css('width', data.cpu.percent + '%');
+        \$('#cpu-info').text(\`Cores: \${data.cpu.cores} | Freq: \${data.cpu.frequency.toFixed(0)} MHz\`);
         
         // Memory
         const memGB = data.memory.total / 1024 / 1024 / 1024;
         const usedGB = data.memory.used / 1024 / 1024 / 1024;
-        $('#mem-percent').text(data.memory.percent.toFixed(1) + '%');
-        $('#mem-bar').css('width', data.memory.percent + '%');
-        $('#mem-info').text(`${usedGB.toFixed(1)} GB / ${memGB.toFixed(1)} GB`);
+        \$('#mem-percent').text(data.memory.percent.toFixed(1) + '%');
+        \$('#mem-bar').css('width', data.memory.percent + '%');
+        \$('#mem-info').text(\`\${usedGB.toFixed(1)} GB / \${memGB.toFixed(1)} GB\`);
         
         // Disk
         const diskGB = data.disk.total / 1024 / 1024 / 1024;
         const usedDiskGB = data.disk.used / 1024 / 1024 / 1024;
-        $('#disk-percent').text(data.disk.percent.toFixed(1) + '%');
-        $('#disk-bar').css('width', data.disk.percent + '%');
-        $('#disk-info').text(`${usedDiskGB.toFixed(1)} GB / ${diskGB.toFixed(1)} GB`);
+        \$('#disk-percent').text(data.disk.percent.toFixed(1) + '%');
+        \$('#disk-bar').css('width', data.disk.percent + '%');
+        \$('#disk-info').text(\`\${usedDiskGB.toFixed(1)} GB / \${diskGB.toFixed(1)} GB\`);
         
         // Network
         const upSpeed = data.network.bytes_sent - lastNetUp;
         const downSpeed = data.network.bytes_recv - lastNetDown;
         
-        $('#net-up').text(formatBytes(upSpeed) + '/s');
-        $('#net-down').text(formatBytes(downSpeed) + '/s');
+        \$('#net-up').text(formatBytes(upSpeed) + '/s');
+        \$('#net-down').text(formatBytes(downSpeed) + '/s');
         
         lastNetUp = data.network.bytes_sent;
         lastNetDown = data.network.bytes_recv;
         
         // System Info
-        $('#sys-hostname').text(data.system.hostname);
-        $('#sys-python').text(data.system.python_version);
-        $('#sys-uptime').text(formatUptime(data.system.boot_time));
+        \$('#sys-hostname').text(data.system.hostname);
+        \$('#sys-python').text(data.system.python_version);
+        \$('#sys-uptime').text(formatUptime(data.system.boot_time));
         
         // Update chart
         updateChart(data);
@@ -2134,9 +2127,9 @@ function formatUptime(bootTime) {
     const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
     const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
     
-    if (days > 0) return `${days}d ${hours}h`;
-    if (hours > 0) return `${hours}h ${minutes}m`;
-    return `${minutes}m`;
+    if (days > 0) return \`\${days}d \${hours}h\`;
+    if (hours > 0) return \`\${hours}h \${minutes}m\`;
+    return \`\${minutes}m\`;
 }
 
 function updateChart(data) {
@@ -2196,7 +2189,7 @@ function updateChart(data) {
 }
 
 function startSync() {
-    $.post('/api/sync/start', function(response) {
+    \$.post('/api/sync/start', function(response) {
         if (response.success) {
             showNotification('success', 'Sincronização iniciada!');
         } else {
@@ -2214,7 +2207,7 @@ function refreshStats() {
 setInterval(updateStats, 5000);
 
 // Inicializar
-$(document).ready(function() {
+\$(document).ready(function() {
     updateStats();
     
     // Socket.IO para atualizações em tempo real
@@ -2223,20 +2216,20 @@ $(document).ready(function() {
     });
     
     socket.on('sync_update', function(data) {
-        $('#sync-tasks').html(`
+        \$('#sync-tasks').html(\`
             <tr>
-                <td>${data.task_id}</td>
-                <td>${data.type}</td>
-                <td><span class="badge bg-info">${data.status}</span></td>
-                <td>${new Date(data.start_time).toLocaleTimeString()}</td>
+                <td>\${data.task_id}</td>
+                <td>\${data.type}</td>
+                <td><span class="badge bg-info">\${data.status}</span></td>
+                <td>\${new Date(data.start_time).toLocaleTimeString()}</td>
                 <td>
                     <div class="progress" style="height: 5px;">
-                        <div class="progress-bar" style="width: ${data.progress}%"></div>
+                        <div class="progress-bar" style="width: \${data.progress}%"></div>
                     </div>
-                    <small>${data.progress}%</small>
+                    <small>\${data.progress}%</small>
                 </td>
             </tr>
-        `);
+        \`);
     });
 });
 </script>
@@ -2244,7 +2237,7 @@ $(document).ready(function() {
 EOF
 
     # CSS principal
-    cat > $INSTALL_DIR/dashboard/static/css/main.css << 'EOF
+    cat > "$INSTALL_DIR/dashboard/static/css/main.css" << EOF
 /* VOD Sync XUI - Main CSS */
 
 :root {
@@ -2426,7 +2419,7 @@ body {
 EOF
 
     # JavaScript principal
-    cat > $INSTALL_DIR/dashboard/static/js/main.js << 'EOF
+    cat > "$INSTALL_DIR/dashboard/static/js/main.js" << EOF
 // VOD Sync XUI - Main JavaScript
 
 class VODSyncApp {
@@ -2449,17 +2442,17 @@ class VODSyncApp {
         });
         
         this.socket.on('sync_started', (data) => {
-            this.showToast('info', `Sincronização iniciada: ${data.task_id}`);
+            this.showToast('info', \`Sincronização iniciada: \${data.task_id}\`);
             this.updateSyncStatus(data);
         });
         
         this.socket.on('sync_completed', (data) => {
-            this.showToast('success', `Sincronização concluída: ${data.task_id}`);
+            this.showToast('success', \`Sincronização concluída: \${data.task_id}\`);
             this.updateSyncStatus(data);
         });
         
         this.socket.on('sync_failed', (data) => {
-            this.showToast('error', `Sincronização falhou: ${data.error}`);
+            this.showToast('error', \`Sincronização falhou: \${data.error}\`);
             this.updateSyncStatus(data);
         });
         
@@ -2470,24 +2463,24 @@ class VODSyncApp {
     
     initializeEventListeners() {
         // Global event listeners
-        $(document).on('click', '[data-action="start-sync"]', (e) => {
+        \$(document).on('click', '[data-action="start-sync"]', (e) => {
             e.preventDefault();
             this.startSync();
         });
         
-        $(document).on('click', '[data-action="stop-sync"]', (e) => {
+        \$(document).on('click', '[data-action="stop-sync"]', (e) => {
             e.preventDefault();
             this.stopSync();
         });
         
-        $(document).on('click', '[data-action="refresh"]', (e) => {
+        \$(document).on('click', '[data-action="refresh"]', (e) => {
             e.preventDefault();
             this.refreshData();
         });
         
         // Auto-refresh dashboard every 30 seconds
         setInterval(() => {
-            if ($('#dashboard').length) {
+            if (\$('#dashboard').length) {
                 this.refreshDashboard();
             }
         }, 30000);
@@ -2508,16 +2501,16 @@ class VODSyncApp {
                 this.showToast('success', 'Sincronização iniciada com sucesso!');
                 this.socket.emit('sync_action', { action: 'started' });
             } else {
-                this.showToast('error', `Erro: ${data.error}`);
+                this.showToast('error', \`Erro: \${data.error}\`);
             }
         } catch (error) {
-            this.showToast('error', `Erro: ${error.message}`);
+            this.showToast('error', \`Erro: \${error.message}\`);
         }
     }
     
     async stopSync(taskId) {
         try {
-            const response = await fetch(`/api/sync/stop/${taskId}`, {
+            const response = await fetch(\`/api/sync/stop/\${taskId}\`, {
                 method: 'POST'
             });
             
@@ -2526,10 +2519,10 @@ class VODSyncApp {
             if (data.success) {
                 this.showToast('warning', 'Sincronização parada!');
             } else {
-                this.showToast('error', `Erro: ${data.error}`);
+                this.showToast('error', \`Erro: \${data.error}\`);
             }
         } catch (error) {
-            this.showToast('error', `Erro: ${error.message}`);
+            this.showToast('error', \`Erro: \${error.message}\`);
         }
     }
     
@@ -2539,20 +2532,20 @@ class VODSyncApp {
             const data = await response.json();
             
             // Update CPU
-            $('#cpu-percent').text(`${data.cpu.percent.toFixed(1)}%`);
-            $('#cpu-bar').css('width', `${data.cpu.percent}%`);
+            \$('#cpu-percent').text(\`\${data.cpu.percent.toFixed(1)}%\`);
+            \$('#cpu-bar').css('width', \`\${data.cpu.percent}%\`);
             
             // Update Memory
-            $('#mem-percent').text(`${data.memory.percent.toFixed(1)}%`);
-            $('#mem-bar').css('width', `${data.memory.percent}%`);
+            \$('#mem-percent').text(\`\${data.memory.percent.toFixed(1)}%\`);
+            \$('#mem-bar').css('width', \`\${data.memory.percent}%\`);
             
             // Update Disk
-            $('#disk-percent').text(`${data.disk.percent.toFixed(1)}%`);
-            $('#disk-bar').css('width', `${data.disk.percent}%`);
+            \$('#disk-percent').text(\`\${data.disk.percent.toFixed(1)}%\`);
+            \$('#disk-bar').css('width', \`\${data.disk.percent}%\`);
             
             // Update system info
-            $('#sys-hostname').text(data.system.hostname);
-            $('#sys-uptime').text(this.formatUptime(data.system.boot_time));
+            \$('#sys-hostname').text(data.system.hostname);
+            \$('#sys-uptime').text(this.formatUptime(data.system.boot_time));
             
         } catch (error) {
             console.error('Erro ao atualizar dashboard:', error);
@@ -2564,7 +2557,7 @@ class VODSyncApp {
             const response = await fetch('/api/system/health');
             const data = await response.json();
             
-            const statusElement = $('#system-status');
+            const statusElement = \$('#system-status');
             if (data.status === 'healthy') {
                 statusElement.html('<i class="fas fa-circle text-success"></i> Sistema Online');
             } else {
@@ -2572,23 +2565,23 @@ class VODSyncApp {
                 this.showToast('error', 'Sistema está com problemas!');
             }
         } catch (error) {
-            $('#system-status').html('<i class="fas fa-circle text-warning"></i> Erro de Conexão');
+            \$('#system-status').html('<i class="fas fa-circle text-warning"></i> Erro de Conexão');
         }
     }
     
     updateSyncStatus(data) {
         // Atualizar interface com status da sincronização
-        const syncTable = $('#sync-tasks');
+        const syncTable = \$('#sync-tasks');
         if (syncTable.length) {
-            const row = `
+            const row = \`
                 <tr>
-                    <td>${data.task_id}</td>
-                    <td>${data.type || 'Manual'}</td>
-                    <td><span class="badge bg-${this.getStatusColor(data.status)}">${data.status}</span></td>
-                    <td>${new Date(data.timestamp).toLocaleTimeString()}</td>
-                    <td>${data.progress || 0}%</td>
+                    <td>\${data.task_id}</td>
+                    <td>\${data.type || 'Manual'}</td>
+                    <td><span class="badge bg-\${this.getStatusColor(data.status)}">\${data.status}</span></td>
+                    <td>\${new Date(data.timestamp).toLocaleTimeString()}</td>
+                    <td>\${data.progress || 0}%</td>
                 </tr>
-            `;
+            \`;
             syncTable.prepend(row);
             
             // Limitar a 10 linhas
@@ -2617,27 +2610,27 @@ class VODSyncApp {
         const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
         const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
         
-        if (days > 0) return `${days}d ${hours}h`;
-        if (hours > 0) return `${hours}h ${minutes}m`;
-        return `${minutes}m`;
+        if (days > 0) return \`\${days}d \${hours}h\`;
+        if (hours > 0) return \`\${hours}h \${minutes}m\`;
+        return \`\${minutes}m\`;
     }
     
     showToast(type, message) {
         // Remove existing toasts
-        $('.toast').remove();
+        \$('.toast').remove();
         
-        const toast = $(`
-            <div class="toast align-items-center text-bg-${type} border-0" role="alert">
+        const toast = \$(\`
+            <div class="toast align-items-center text-bg-\${type} border-0" role="alert">
                 <div class="d-flex">
                     <div class="toast-body">
-                        ${message}
+                        \${message}
                     </div>
                     <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
                 </div>
             </div>
-        `);
+        \`);
         
-        $('body').append(toast);
+        \$('body').append(toast);
         
         const bsToast = new bootstrap.Toast(toast[0], {
             autohide: true,
@@ -2648,14 +2641,14 @@ class VODSyncApp {
     }
     
     showAlert(type, message) {
-        const alert = $(`
-            <div class="alert alert-${type} alert-dismissible fade show" role="alert">
-                ${message}
+        const alert = \$(\`
+            <div class="alert alert-\${type} alert-dismissible fade show" role="alert">
+                \${message}
                 <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
             </div>
-        `);
+        \`);
         
-        $('#notification-area').prepend(alert);
+        \$('#notification-area').prepend(alert);
         
         // Auto-remove after 10 seconds
         setTimeout(() => {
@@ -2671,18 +2664,18 @@ class VODSyncApp {
 }
 
 // Initialize app when document is ready
-$(document).ready(function() {
+\$(document).ready(function() {
     window.vodSyncApp = new VODSyncApp();
     
     // Tooltips
-    $('[data-bs-toggle="tooltip"]').tooltip();
+    \$('[data-bs-toggle="tooltip"]').tooltip();
     
     // Popovers
-    $('[data-bs-toggle="popover"]').popover();
+    \$('[data-bs-toggle="popover"]').popover();
     
     // Auto-dismiss alerts after 5 seconds
     setTimeout(() => {
-        $('.alert:not(.alert-permanent)').alert('close');
+        \$('.alert:not(.alert-permanent)').alert('close');
     }, 5000);
 });
 
@@ -2705,11 +2698,11 @@ function formatDuration(seconds) {
     const secs = seconds % 60;
     
     if (hours > 0) {
-        return `${hours}h ${minutes}m`;
+        return \`\${hours}h \${minutes}m\`;
     } else if (minutes > 0) {
-        return `${minutes}m ${secs}s`;
+        return \`\${minutes}m \${secs}s\`;
     } else {
-        return `${secs}s`;
+        return \`\${secs}s\`;
     }
 }
 
@@ -2728,7 +2721,7 @@ window.onerror = function(message, source, lineno, colno, error) {
     }
     
     if (window.vodSyncApp) {
-        window.vodSyncApp.showToast('error', `Erro: ${message}`);
+        window.vodSyncApp.showToast('error', \`Erro: \${message}\`);
     }
 };
 EOF
@@ -2836,16 +2829,16 @@ setup_python_env() {
     print_step "Configurando ambiente Python..."
     
     # Criar ambiente virtual
-    python3 -m venv $INSTALL_DIR/venv
+    python3 -m venv "$INSTALL_DIR/venv"
     
     # Ativar e instalar pacotes
-    source $INSTALL_DIR/venv/bin/activate
+    source "$INSTALL_DIR/venv/bin/activate"
     
     # Atualizar pip
     pip install --upgrade pip setuptools wheel
     
     # Instalar requirements
-    pip install -r $INSTALL_DIR/requirements.txt
+    pip install -r "$INSTALL_DIR/requirements.txt"
     
     print_success "Ambiente Python configurado"
 }
@@ -2855,7 +2848,7 @@ setup_system_services() {
     print_step "Configurando serviços systemd..."
     
     # Copiar arquivos de serviço
-    cp $INSTALL_DIR/systemd/*.service /etc/systemd/system/
+    cp "$INSTALL_DIR/systemd/"*.service /etc/systemd/system/
     
     # Recarregar systemd
     systemctl daemon-reload
@@ -2873,7 +2866,7 @@ setup_nginx() {
     print_step "Configurando Nginx..."
     
     # Copiar configuração do Nginx
-    cp $INSTALL_DIR/config/nginx.conf /etc/nginx/nginx.conf
+    cp "$INSTALL_DIR/config/nginx.conf" /etc/nginx/nginx.conf
     
     # Testar configuração
     nginx -t
@@ -2904,21 +2897,21 @@ create_system_user() {
     print_step "Criando usuário do sistema..."
     
     if ! id "$APP_USER" &>/dev/null; then
-        useradd -r -s /bin/bash -d $INSTALL_DIR -m $APP_USER
+        useradd -r -s /bin/bash -d "$INSTALL_DIR" -m "$APP_USER"
     fi
     
     # Definir permissões
-    chown -R $APP_USER:$APP_GROUP $INSTALL_DIR
-    chmod -R 750 $INSTALL_DIR
+    chown -R "$APP_USER:$APP_GROUP" "$INSTALL_DIR"
+    chmod -R 750 "$INSTALL_DIR"
     
     # Permissões especiais para logs e dados
-    chown -R $APP_USER:$APP_GROUP $INSTALL_DIR/logs
-    chown -R $APP_USER:$APP_GROUP $INSTALL_DIR/data
-    chmod -R 770 $INSTALL_DIR/logs $INSTALL_DIR/data
+    chown -R "$APP_USER:$APP_GROUP" "$INSTALL_DIR/logs"
+    chown -R "$APP_USER:$APP_GROUP" "$INSTALL_DIR/data"
+    chmod -R 770 "$INSTALL_DIR/logs" "$INSTALL_DIR/data"
     
     # Adicionar ao grupo www-data/nginx
-    usermod -a -G www-data $APP_USER 2>/dev/null || true
-    usermod -a -G nginx $APP_USER 2>/dev/null || true
+    usermod -a -G www-data "$APP_USER" 2>/dev/null || true
+    usermod -a -G nginx "$APP_USER" 2>/dev/null || true
     
     print_success "Usuário do sistema criado"
 }
@@ -2927,10 +2920,10 @@ create_system_user() {
 setup_backup() {
     print_step "Configurando sistema de backup..."
     
-    mkdir -p $INSTALL_DIR/scripts
+    mkdir -p "$INSTALL_DIR/scripts"
     
     # Script de backup
-    cat > $INSTALL_DIR/scripts/backup.sh << EOF
+    cat > "$INSTALL_DIR/scripts/backup.sh" << EOF
 #!/bin/bash
 BACKUP_DIR="$INSTALL_DIR/backups"
 DATE=\$(date +%Y%m%d_%H%M%S)
@@ -2939,30 +2932,30 @@ BACKUP_FILE="\$BACKUP_DIR/backup_\$DATE.tar.gz"
 echo "Iniciando backup em \$(date)"
 
 # Criar backup dos dados
-tar -czf \$BACKUP_FILE \\
-    $INSTALL_DIR/data \\
-    $INSTALL_DIR/config \\
-    $INSTALL_DIR/logs 2>/dev/null
+tar -czf "\$BACKUP_FILE" \\
+    "$INSTALL_DIR/data" \\
+    "$INSTALL_DIR/config" \\
+    "$INSTALL_DIR/logs" 2>/dev/null
 
 # Backup do banco de dados
-mysqldump -u vod_sync -p${DB_PASSWORD} vod_sync > \$BACKUP_DIR/db_backup_\$DATE.sql 2>/dev/null
+mysqldump -u vod_sync -p"${DB_PASSWORD}" vod_sync > "\$BACKUP_DIR/db_backup_\$DATE.sql" 2>/dev/null
 
 # Compactar backup do banco
-gzip -f \$BACKUP_DIR/db_backup_\$DATE.sql
+gzip -f "\$BACKUP_DIR/db_backup_\$DATE.sql"
 
 # Manter apenas últimos 30 backups
-find \$BACKUP_DIR -name "backup_*.tar.gz" -type f -mtime +30 -delete
-find \$BACKUP_DIR -name "db_backup_*.sql.gz" -type f -mtime +30 -delete
+find "\$BACKUP_DIR" -name "backup_*.tar.gz" -type f -mtime +30 -delete
+find "\$BACKUP_DIR" -name "db_backup_*.sql.gz" -type f -mtime +30 -delete
 
 echo "Backup concluído: \$BACKUP_FILE"
-echo "Tamanho: \$(du -h \$BACKUP_FILE | cut -f1)"
+echo "Tamanho: \$(du -h "\$BACKUP_FILE" | cut -f1)"
 EOF
     
-    chmod +x $INSTALL_DIR/scripts/backup.sh
-    chown $APP_USER:$APP_GROUP $INSTALL_DIR/scripts/backup.sh
+    chmod +x "$INSTALL_DIR/scripts/backup.sh"
+    chown "$APP_USER:$APP_GROUP" "$INSTALL_DIR/scripts/backup.sh"
     
     # Agendar no cron
-    (crontab -l 2>/dev/null; echo "0 2 * * * $INSTALL_DIR/scripts/backup.sh >> $INSTALL_DIR/logs/backup.log 2>&1") | crontab -u $APP_USER -
+    (crontab -l 2>/dev/null; echo "0 2 * * * $INSTALL_DIR/scripts/backup.sh >> $INSTALL_DIR/logs/backup.log 2>&1") | crontab -u "$APP_USER" -
     
     print_success "Sistema de backup configurado"
 }
@@ -2972,7 +2965,7 @@ setup_monitoring() {
     print_step "Configurando monitoramento..."
     
     # Script de monitoramento
-    cat > $INSTALL_DIR/scripts/monitor.sh << EOF
+    cat > "$INSTALL_DIR/scripts/monitor.sh" << EOF
 #!/bin/bash
 LOG_FILE="$INSTALL_DIR/logs/monitor.log"
 
@@ -2999,19 +2992,19 @@ get_metrics() {
     TIMESTAMP=\$(date '+%Y-%m-%d %H:%M:%S')
     
     # Log
-    echo "\$TIMESTAMP - CPU: \$CPU_PERCENT% | RAM: \$MEM_PERCENT% (\$MEM_USED/\$MEM_TOTAL) | DISK: \$DISK_PERCENT% (\$DISK_USED/\$DISK_TOTAL) | NET: IN=\$NET_IN OUT=\$NET_OUT" >> \$LOG_FILE
+    echo "\$TIMESTAMP - CPU: \$CPU_PERCENT% | RAM: \$MEM_PERCENT% (\$MEM_USED/\$MEM_TOTAL) | DISK: \$DISK_PERCENT% (\$DISK_USED/\$DISK_TOTAL) | NET: IN=\$NET_IN OUT=\$NET_OUT" >> "\$LOG_FILE"
     
     # Verificar limites
     if [ \$(echo "\$CPU_PERCENT > 90" | bc) -eq 1 ]; then
-        echo "\$TIMESTAMP - ALERTA: CPU acima de 90% (\$CPU_PERCENT%)" >> \$LOG_FILE
+        echo "\$TIMESTAMP - ALERTA: CPU acima de 90% (\$CPU_PERCENT%)" >> "\$LOG_FILE"
     fi
     
     if [ \$(echo "\$MEM_PERCENT > 90" | bc) -eq 1 ]; then
-        echo "\$TIMESTAMP - ALERTA: Memória acima de 90% (\$MEM_PERCENT%)" >> \$LOG_FILE
+        echo "\$TIMESTAMP - ALERTA: Memória acima de 90% (\$MEM_PERCENT%)" >> "\$LOG_FILE"
     fi
     
     if [ "\$DISK_PERCENT" -gt 90 ]; then
-        echo "\$TIMESTAMP - ALERTA: Disco acima de 90% (\$DISK_PERCENT%)" >> \$LOG_FILE
+        echo "\$TIMESTAMP - ALERTA: Disco acima de 90% (\$DISK_PERCENT%)" >> "\$LOG_FILE"
     fi
 }
 
@@ -3028,11 +3021,11 @@ if [ -f "\$LOG_FILE" ]; then
 fi
 EOF
     
-    chmod +x $INSTALL_DIR/scripts/monitor.sh
-    chown $APP_USER:$APP_GROUP $INSTALL_DIR/scripts/monitor.sh
+    chmod +x "$INSTALL_DIR/scripts/monitor.sh"
+    chown "$APP_USER:$APP_GROUP" "$INSTALL_DIR/scripts/monitor.sh"
     
     # Agendar no cron
-    (crontab -l 2>/dev/null; echo "*/5 * * * * $INSTALL_DIR/scripts/monitor.sh") | crontab -u $APP_USER -
+    (crontab -l 2>/dev/null; echo "*/5 * * * * $INSTALL_DIR/scripts/monitor.sh") | crontab -u "$APP_USER" -
     
     print_success "Monitoramento configurado"
 }
@@ -3042,28 +3035,28 @@ create_management_scripts() {
     print_step "Criando scripts de gerenciamento..."
     
     # start.sh
-    cat > $INSTALL_DIR/start.sh << EOF
+    cat > "$INSTALL_DIR/start.sh" << EOF
 #!/bin/bash
 systemctl start vod-sync vod-sync-celery vod-sync-celerybeat
 echo "Serviços VOD Sync iniciados!"
 EOF
     
     # stop.sh
-    cat > $INSTALL_DIR/stop.sh << EOF
+    cat > "$INSTALL_DIR/stop.sh" << EOF
 #!/bin/bash
 systemctl stop vod-sync-celerybeat vod-sync-celery vod-sync
 echo "Serviços VOD Sync parados!"
 EOF
     
     # restart.sh
-    cat > $INSTALL_DIR/restart.sh << EOF
+    cat > "$INSTALL_DIR/restart.sh" << EOF
 #!/bin/bash
 systemctl restart vod-sync vod-sync-celery vod-sync-celerybeat
 echo "Serviços VOD Sync reiniciados!"
 EOF
     
     # status.sh
-    cat > $INSTALL_DIR/status.sh << EOF
+    cat > "$INSTALL_DIR/status.sh" << EOF
 #!/bin/bash
 echo "=== Status dos Serviços VOD Sync ==="
 echo ""
@@ -3075,15 +3068,15 @@ systemctl status vod-sync-celerybeat --no-pager
 EOF
     
     # logs.sh
-    cat > $INSTALL_DIR/logs.sh << EOF
+    cat > "$INSTALL_DIR/logs.sh" << EOF
 #!/bin/bash
-tail -f $INSTALL_DIR/logs/vod_sync.log
+tail -f "$INSTALL_DIR/logs/vod_sync.log"
 EOF
     
     # update.sh
-    cat > $INSTALL_DIR/update.sh << EOF
+    cat > "$INSTALL_DIR/update.sh" << EOF
 #!/bin/bash
-cd $INSTALL_DIR
+cd "$INSTALL_DIR"
 source venv/bin/activate
 pip install -r requirements.txt --upgrade
 systemctl restart vod-sync vod-sync-celery vod-sync-celerybeat
@@ -3091,15 +3084,15 @@ echo "Sistema VOD Sync atualizado!"
 EOF
     
     # backup-now.sh
-    cat > $INSTALL_DIR/backup-now.sh << EOF
+    cat > "$INSTALL_DIR/backup-now.sh" << EOF
 #!/bin/bash
-$INSTALL_DIR/scripts/backup.sh
+"$INSTALL_DIR/scripts/backup.sh"
 echo "Backup manual executado!"
 EOF
     
     # Dar permissões
-    chmod +x $INSTALL_DIR/*.sh
-    chown $APP_USER:$APP_GROUP $INSTALL_DIR/*.sh
+    chmod +x "$INSTALL_DIR"/*.sh
+    chown "$APP_USER:$APP_GROUP" "$INSTALL_DIR"/*.sh
     
     print_success "Scripts de gerenciamento criados"
 }
@@ -3108,7 +3101,7 @@ EOF
 initialize_application() {
     print_step "Inicializando aplicação..."
     
-    cd $INSTALL_DIR
+    cd "$INSTALL_DIR"
     source venv/bin/activate
     
     # Criar banco de dados
@@ -3134,7 +3127,7 @@ with app.app_context():
 create_readme() {
     print_step "Criando documentação..."
     
-    cat > $INSTALL_DIR/README.md << EOF
+    cat > "$INSTALL_DIR/README.md" << EOF
 # VOD Sync XUI - Sistema de Sincronização de VODs
 
 ## Visão Geral
@@ -3144,7 +3137,7 @@ Sistema completo para sincronização de VODs com o XUI One, incluindo dashboard
 O sistema já está instalado em: $INSTALL_DIR
 
 ## Acesso
-- Dashboard: http://$(hostname -I | awk '{print $1}'):5000
+- Dashboard: http://\$(hostname -I | awk '{print \$1}'):5000
 - Usuário: admin
 - Senha: admin123
 
@@ -3244,7 +3237,7 @@ show_installation_summary() {
     echo "  $INSTALL_DIR"
     echo ""
     echo -e "${CYAN}🌐 Acesso ao Sistema:${NC}"
-    echo "  URL: http://$(hostname -I | awk '{print $1}'):5000"
+    echo "  URL: http://$(hostname -I | awk '{print \$1}'):5000"
     echo "  Usuário: admin"
     echo "  Senha: admin123"
     echo ""
@@ -3312,7 +3305,7 @@ main_installation() {
     show_installation_summary
     
     # Registrar instalação
-    echo "$(date) - Instalação concluída" > $INSTALL_DIR/logs/install.log
+    echo "$(date) - Instalação concluída" > "$INSTALL_DIR/logs/install.log"
 }
 
 # Limpeza em caso de erro
@@ -3326,10 +3319,10 @@ cleanup_on_error() {
     rm -f /etc/systemd/system/vod-sync*.service 2>/dev/null || true
     
     # Remover usuário
-    userdel -r $APP_USER 2>/dev/null || true
+    userdel -r "$APP_USER" 2>/dev/null || true
     
     # Remover diretório de instalação
-    rm -rf $INSTALL_DIR 2>/dev/null || true
+    rm -rf "$INSTALL_DIR" 2>/dev/null || true
     
     print_warning "Instalação revertida. Por favor, execute novamente."
     exit 1
@@ -3348,5 +3341,5 @@ print_header
 print_success "🎉 Instalação concluída com sucesso!"
 echo ""
 echo -e "${GREEN}O sistema VOD Sync XUI está pronto para uso!"
-echo -e "Acesse: http://$(hostname -I | awk '{print $1}'):5000${NC}"
+echo -e "Acesse: http://$(hostname -I | awk '{print \$1}'):5000${NC}"
 echo ""
