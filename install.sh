@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # ============================================
-# INSTALADOR XUI ONE VODs SYNC - Ubuntu 20.04
+# INSTALADOR XUI ONE VODs SYNC - CONEXÃO REMOTA
 # ============================================
-# Script completo de instalação e configuração
+# Sistema completo com conexão a banco XUI ONE remoto
 # Autor: XUI ONE VODs Sync Team
-# Versão: 2.0.0
+# Versão: 3.0.0
 # ============================================
 
 # Cores para output
@@ -18,373 +18,115 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Constantes
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="3.0.0"
 INSTALL_DIR="/opt/xui-one-vods-sync"
 CONFIG_DIR="/etc/xui-one-vods-sync"
 LOG_DIR="/var/log/xui-one-vods-sync"
-SERVICE_USER="xui-vods"
-DATABASE_NAME="xui_one_vods"
-DATABASE_USER="xui_one_vods_user"
+WEB_DIR="/var/www/xui-vods-sync"
+SERVICE_USER="xui-sync"
 API_PORT="8001"
 WEB_PORT="8080"
-DOMAIN_NAME=""
-EMAIL=""
-ENABLE_SSL=false
+ADMIN_USER="admin"
+ADMIN_PASS="admin123"
 
-# Variáveis de controle
+# Variáveis
 IS_ROOT=false
 IS_UBUNTU=false
-IS_20_04=false
-MYSQL_ROOT_PASS=""
-DB_PASSWORD=""
-API_KEY=""
-INSTALL_TYPE="full" # full, api-only, web-only
+MYSQL_LOCAL_PASS=""
+ENABLE_SSL=false
+DOMAIN_NAME=""
+EMAIL=""
 
-# Funções de utilidade
 print_header() {
     clear
     echo -e "${PURPLE}"
     echo "============================================="
     echo "   XUI ONE VODs Sync - Instalador v$SCRIPT_VERSION"
+    echo "       COM CONEXÃO REMOTA XUI ONE"
     echo "============================================="
     echo -e "${NC}"
 }
 
-print_status() {
-    echo -e "${BLUE}[*]${NC} $1"
-}
+print_status() { echo -e "${BLUE}[*]${NC} $1"; }
+print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
+print_error() { echo -e "${RED}[✗]${NC} $1"; }
+print_info() { echo -e "${CYAN}[i]${NC} $1"; }
 
-print_success() {
-    echo -e "${GREEN}[✓]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[!]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[✗]${NC} $1"
-}
-
-print_info() {
-    echo -e "${CYAN}[i]${NC} $1"
-}
-
-pause() {
-    echo ""
-    read -p "Pressione Enter para continuar..."
-}
-
-generate_random_password() {
-    local length=${1:-24}
-    tr -dc 'A-Za-z0-9!@#$%^&*()_+-=' < /dev/urandom | head -c $length
+generate_password() {
+    tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16
 }
 
 check_root() {
     if [[ $EUID -eq 0 ]]; then
         IS_ROOT=true
-        print_success "Executando como root"
     else
-        print_error "Este script precisa ser executado como root"
-        echo "Use: sudo $0"
+        print_error "Execute como root: sudo $0"
         exit 1
     fi
 }
 
 check_os() {
-    print_status "Verificando sistema operacional..."
-    
     if [[ -f /etc/os-release ]]; then
         . /etc/os-release
         if [[ "$ID" == "ubuntu" ]]; then
             IS_UBUNTU=true
-            print_success "Sistema: Ubuntu"
-            
-            if [[ "$VERSION_ID" == "20.04" ]]; then
-                IS_20_04=true
-                print_success "Versão: 20.04 LTS"
-            else
-                print_warning "Versão: $VERSION_ID (Este script foi testado para 20.04)"
-                read -p "Deseja continuar mesmo assim? (s/N): " -n 1 -r
-                echo
-                if [[ ! $REPLY =~ ^[Ss]$ ]]; then
-                    exit 1
-                fi
-            fi
+            print_success "Ubuntu detectado"
         else
-            print_error "Sistema não suportado: $ID"
-            print_info "Este instalador é específico para Ubuntu 20.04"
+            print_error "Só Ubuntu é suportado"
             exit 1
         fi
-    else
-        print_error "Não foi possível identificar o sistema operacional"
-        exit 1
-    fi
-}
-
-check_dependencies() {
-    print_status "Verificando dependências básicas..."
-    
-    local missing_deps=()
-    
-    # Verifica comandos essenciais
-    for cmd in curl wget git systemctl; do
-        if ! command -v $cmd &> /dev/null; then
-            missing_deps+=($cmd)
-        fi
-    done
-    
-    if [[ ${#missing_deps[@]} -gt 0 ]]; then
-        print_warning "Dependências faltando: ${missing_deps[*]}"
-        print_status "Instalando dependências básicas..."
-        apt-get update
-        apt-get install -y curl wget git systemd
-    else
-        print_success "Dependências básicas verificadas"
-    fi
-}
-
-get_install_type() {
-    print_header
-    echo "Selecione o tipo de instalação:"
-    echo "1) Instalação Completa (API + Painel Web + MySQL + Nginx)"
-    echo "2) Apenas API Backend"
-    echo "3) Apenas Painel Web"
-    echo "4) Instalação Personalizada"
-    echo ""
-    
-    read -p "Digite sua escolha [1-4]: " choice
-    
-    case $choice in
-        1) INSTALL_TYPE="full" ;;
-        2) INSTALL_TYPE="api-only" ;;
-        3) INSTALL_TYPE="web-only" ;;
-        4) INSTALL_TYPE="custom" ;;
-        *) INSTALL_TYPE="full" ;;
-    esac
-    
-    if [[ "$INSTALL_TYPE" == "custom" ]]; then
-        echo ""
-        echo "Selecione componentes para instalar:"
-        read -p "Instalar API Backend? (s/N): " -n 1 -r
-        echo
-        [[ $REPLY =~ ^[Ss]$ ]] && INSTALL_API=true || INSTALL_API=false
-        
-        read -p "Instalar Painel Web? (s/N): " -n 1 -r
-        echo
-        [[ $REPLY =~ ^[Ss]$ ]] && INSTALL_WEB=true || INSTALL_WEB=false
-        
-        read -p "Instalar MySQL? (s/N): " -n 1 -r
-        echo
-        [[ $REPLY =~ ^[Ss]$ ]] && INSTALL_MYSQL=true || INSTALL_MYSQL=false
-        
-        read -p "Instalar Nginx? (s/N): " -n 1 -r
-        echo
-        [[ $REPLY =~ ^[Ss]$ ]] && INSTALL_NGINX=true || INSTALL_NGINX=false
-        
-        read -p "Configurar SSL? (s/N): " -n 1 -r
-        echo
-        [[ $REPLY =~ ^[Ss]$ ]] && ENABLE_SSL=true || ENABLE_SSL=false
-    fi
-}
-
-get_configuration() {
-    print_header
-    print_status "Configuração do Sistema"
-    echo ""
-    
-    # Configurações gerais
-    if [[ "$INSTALL_TYPE" == "full" || "$INSTALL_API" == true ]]; then
-        read -p "Porta para API Backend [$API_PORT]: " input_port
-        API_PORT=${input_port:-$API_PORT}
-        
-        read -p "Chave API (deixe em branco para gerar automaticamente): " input_key
-        if [[ -z "$input_key" ]]; then
-            API_KEY=$(generate_random_password 32)
-            print_info "Chave API gerada: $API_KEY"
-        else
-            API_KEY="$input_key"
-        fi
-    fi
-    
-    if [[ "$INSTALL_TYPE" == "full" || "$INSTALL_WEB" == true ]]; then
-        read -p "Porta para Painel Web [$WEB_PORT]: " input_web_port
-        WEB_PORT=${input_web_port:-$WEB_PORT}
-    fi
-    
-    # Configurações de banco de dados
-    if [[ "$INSTALL_TYPE" == "full" || "$INSTALL_MYSQL" == true ]]; then
-        echo ""
-        print_status "Configuração do Banco de Dados MySQL"
-        
-        # Verifica se MySQL já está instalado
-        if systemctl is-active --quiet mysql; then
-            print_warning "MySQL já está instalado e rodando"
-            read -p "Usar instalação existente? (S/n): " -n 1 -r
-            echo
-            if [[ $REPLY =~ ^[Nn]$ ]]; then
-                INSTALL_MYSQL=true
-            else
-                INSTALL_MYSQL=false
-                read -p "Senha root do MySQL: " -s MYSQL_ROOT_PASS
-                echo
-            fi
-        else
-            print_status "MySQL será instalado"
-            read -p "Definir senha para root do MySQL (deixe em branco para gerar): " -s input_db_root
-            echo
-            MYSQL_ROOT_PASS=${input_db_root:-$(generate_random_password 16)}
-        fi
-        
-        read -p "Senha para usuário do banco de dados (deixe em branco para gerar): " -s input_db_pass
-        echo
-        DB_PASSWORD=${input_db_pass:-$(generate_random_password 16)}
-    fi
-    
-    # Configurações de domínio e SSL
-    if [[ "$ENABLE_SSL" == true || "$INSTALL_NGINX" == true ]]; then
-        echo ""
-        print_status "Configuração de Domínio e SSL"
-        
-        read -p "Domínio (ex: vods.seusite.com): " DOMAIN_NAME
-        read -p "E-mail para certificados SSL: " EMAIL
-        
-        if [[ -z "$DOMAIN_NAME" ]]; then
-            print_warning "Domínio não informado, SSL não será configurado"
-            ENABLE_SSL=false
-        elif [[ -z "$EMAIL" ]]; then
-            print_warning "E-mail não informado, SSL não será configurado"
-            ENABLE_SSL=false
-        else
-            ENABLE_SSL=true
-        fi
-    fi
-    
-    # Resumo da configuração
-    echo ""
-    print_status "Resumo da Configuração:"
-    echo "----------------------------------------"
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_API" == true ]] && echo "API Backend: Sim (Porta: $API_PORT)"
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_WEB" == true ]] && echo "Painel Web: Sim (Porta: $WEB_PORT)"
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_MYSQL" == true ]] && echo "MySQL: Sim"
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_NGINX" == true ]] && echo "Nginx: Sim"
-    [[ "$ENABLE_SSL" == true ]] && echo "SSL: Sim (Domínio: $DOMAIN_NAME)"
-    echo "----------------------------------------"
-    
-    read -p "Continuar com a instalação? (S/n): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Nn]$ ]]; then
-        print_info "Instalação cancelada pelo usuário"
-        exit 0
     fi
 }
 
 update_system() {
     print_status "Atualizando sistema..."
-    
     apt-get update
     apt-get upgrade -y
-    apt-get autoremove -y
-    
     print_success "Sistema atualizado"
 }
 
-install_mysql() {
-    if [[ "$INSTALL_MYSQL" == false ]] && [[ "$INSTALL_TYPE" != "full" ]]; then
-        return 0
-    fi
-    
-    print_status "Instalando MySQL Server..."
-    
-    # Instala MySQL Server
+install_mysql_local() {
+    print_status "Instalando MySQL local..."
     apt-get install -y mysql-server
     
-    # Configura o MySQL
-    print_status "Configurando MySQL..."
-    
-    # Inicia o serviço
+    # Configura MySQL
     systemctl start mysql
     systemctl enable mysql
     
+    # Gera senha para MySQL local
+    MYSQL_LOCAL_PASS=$(generate_password)
+    
     # Configura segurança
-    if [[ -n "$MYSQL_ROOT_PASS" ]]; then
-        print_status "Configurando senha root do MySQL..."
-        
-        # Cria arquivo temporário para configuração
-        cat > /tmp/mysql_secure_installation.sql << EOF
-ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$MYSQL_ROOT_PASS';
-DELETE FROM mysql.user WHERE User='';
-DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
-DROP DATABASE IF EXISTS test;
-DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
-FLUSH PRIVILEGES;
-EOF
-        
-        mysql -u root < /tmp/mysql_secure_installation.sql
-        rm /tmp/mysql_secure_installation.sql
-        
-        # Cria arquivo de opções do MySQL
-        cat > /root/.my.cnf << EOF
-[client]
-user=root
-password=$MYSQL_ROOT_PASS
-EOF
-        
-        chmod 600 /root/.my.cnf
-    fi
+    mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$MYSQL_LOCAL_PASS';"
+    mysql -e "DELETE FROM mysql.user WHERE User='';"
+    mysql -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
+    mysql -e "DROP DATABASE IF EXISTS test;"
+    mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
+    mysql -e "FLUSH PRIVILEGES;"
     
-    # Cria banco de dados e usuário
-    print_status "Criando banco de dados..."
+    # Cria banco para o sincronizador
+    mysql -e "CREATE DATABASE IF NOT EXISTS xui_sync_manager CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+    mysql -e "CREATE USER IF NOT EXISTS 'xui_sync_user'@'localhost' IDENTIFIED BY '$MYSQL_LOCAL_PASS';"
+    mysql -e "GRANT ALL PRIVILEGES ON xui_sync_manager.* TO 'xui_sync_user'@'localhost';"
+    mysql -e "FLUSH PRIVILEGES;"
     
-    cat > /tmp/create_database.sql << EOF
-CREATE DATABASE IF NOT EXISTS $DATABASE_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '$DATABASE_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';
-GRANT ALL PRIVILEGES ON $DATABASE_NAME.* TO '$DATABASE_USER'@'localhost';
-FLUSH PRIVILEGES;
-EOF
-    
-    if [[ -n "$MYSQL_ROOT_PASS" ]]; then
-        mysql -u root -p"$MYSQL_ROOT_PASS" < /tmp/create_database.sql
-    else
-        mysql -u root < /tmp/create_database.sql
-    fi
-    
-    rm /tmp/create_database.sql
-    
-    print_success "MySQL instalado e configurado"
+    print_success "MySQL local instalado"
+    print_info "Senha MySQL local: $MYSQL_LOCAL_PASS"
 }
 
-install_python_dependencies() {
-    if [[ "$INSTALL_TYPE" == "web-only" ]]; then
-        return 0
-    fi
-    
+install_python() {
     print_status "Instalando Python e dependências..."
-    
-    # Instala Python 3.8 e ferramentas
     apt-get install -y python3.8 python3.8-dev python3-pip python3.8-venv \
-        python3-setuptools python3-wheel build-essential
-    
-    # Instala dependências do sistema para MySQL
-    apt-get install -y libmysqlclient-dev libssl-dev libffi-dev
+        python3-setuptools python3-wheel build-essential \
+        libmysqlclient-dev libssl-dev libffi-dev
     
     # Cria ambiente virtual
-    print_status "Criando ambiente virtual Python..."
-    
-    if [[ ! -d "$INSTALL_DIR/venv" ]]; then
-        python3.8 -m venv "$INSTALL_DIR/venv"
-    fi
-    
-    # Ativa o ambiente virtual e instala pacotes Python
+    python3.8 -m venv "$INSTALL_DIR/venv"
     source "$INSTALL_DIR/venv/bin/activate"
     
-    # Upgrade pip
-    pip install --upgrade pip
-    
     # Instala dependências Python
-    print_status "Instalando pacotes Python..."
-    
-    cat > "$INSTALL_DIR/requirements.txt" << EOF
+    cat > "$INSTALL_DIR/requirements.txt" << 'EOF'
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 mysql-connector-python==8.2.0
@@ -396,10 +138,7 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-dotenv==1.0.0
 cryptography==41.0.7
-aiosqlite==0.19.0
-httpx==0.25.1
-pytz==2023.3
-colorlog==6.7.0
+jinja2==3.1.2
 python-dateutil==2.8.2
 pyyaml==6.0.1
 celery==5.3.4
@@ -408,122 +147,38 @@ flower==2.0.1
 EOF
     
     pip install -r "$INSTALL_DIR/requirements.txt"
-    
-    # Desativa ambiente virtual
     deactivate
-    
-    print_success "Python e dependências instalados"
+    print_success "Python instalado"
 }
 
 install_nginx() {
-    if [[ "$INSTALL_NGINX" == false ]] && [[ "$INSTALL_TYPE" != "full" ]]; then
-        return 0
-    fi
-    
     print_status "Instalando Nginx..."
-    
     apt-get install -y nginx
-    
-    # Cria estrutura de diretórios
-    mkdir -p /var/www/html
-    mkdir -p /etc/nginx/ssl
-    
-    # Configuração básica do Nginx
-    cat > /etc/nginx/nginx.conf << 'EOF'
-user www-data;
-worker_processes auto;
-pid /run/nginx.pid;
-include /etc/nginx/modules-enabled/*.conf;
-
-events {
-    worker_connections 768;
-}
-
-http {
-    sendfile on;
-    tcp_nopush on;
-    tcp_nodelay on;
-    keepalive_timeout 65;
-    types_hash_max_size 2048;
-    
-    include /etc/nginx/mime.types;
-    default_type application/octet-stream;
-    
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers on;
-    
-    access_log /var/log/nginx/access.log;
-    error_log /var/log/nginx/error.log;
-    
-    gzip on;
-    gzip_vary on;
-    gzip_min_length 1024;
-    gzip_types text/plain text/css text/xml text/javascript application/javascript application/xml+rss application/json;
-    
-    include /etc/nginx/conf.d/*.conf;
-    include /etc/nginx/sites-enabled/*;
-}
-EOF
-    
     print_success "Nginx instalado"
 }
 
-install_nodejs() {
-    if [[ "$INSTALL_TYPE" == "api-only" ]]; then
-        return 0
-    fi
-    
-    print_status "Instalando Node.js..."
-    
-    # Instala Node.js 18.x
-    curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
-    apt-get install -y nodejs
-    
-    # Verifica instalação
-    node --version
-    npm --version
-    
-    print_success "Node.js instalado"
-}
-
-create_service_user() {
-    print_status "Criando usuário de serviço..."
-    
+create_user() {
+    print_status "Criando usuário do sistema..."
     if id "$SERVICE_USER" &>/dev/null; then
-        print_warning "Usuário $SERVICE_USER já existe"
-    else
-        useradd -r -s /bin/false -d "$INSTALL_DIR" -m "$SERVICE_USER"
-        print_success "Usuário $SERVICE_USER criado"
+        userdel -r "$SERVICE_USER"
     fi
-    
-    # Configura permissões
-    chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR"
-    chmod 750 "$INSTALL_DIR"
+    useradd -r -s /bin/false -d "$INSTALL_DIR" -m "$SERVICE_USER"
+    print_success "Usuário criado"
 }
 
 setup_directories() {
-    print_status "Criando diretórios do sistema..."
+    print_status "Criando diretórios..."
     
-    # Diretórios principais
     mkdir -p "$INSTALL_DIR"
     mkdir -p "$CONFIG_DIR"
     mkdir -p "$LOG_DIR"
+    mkdir -p "$WEB_DIR"
     mkdir -p "$INSTALL_DIR/data"
     mkdir -p "$INSTALL_DIR/backups"
     mkdir -p "$INSTALL_DIR/scripts"
-    
-    # Diretórios para a API
     mkdir -p "$INSTALL_DIR/api"
-    mkdir -p "$INSTALL_DIR/api/logs"
-    mkdir -p "$INSTALL_DIR/api/static"
-    mkdir -p "$INSTALL_DIR/api/templates"
-    
-    # Diretórios para o painel web
     mkdir -p "$INSTALL_DIR/web"
-    mkdir -p "$INSTALL_DIR/web/public"
-    mkdir -p "$INSTALL_DIR/web/uploads"
     
-    # Define permissões
     chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR"
     chown -R "$SERVICE_USER":"$SERVICE_USER" "$LOG_DIR"
     chmod 755 "$LOG_DIR"
@@ -531,266 +186,940 @@ setup_directories() {
     print_success "Diretórios criados"
 }
 
-setup_api_backend() {
-    if [[ "$INSTALL_TYPE" == "web-only" ]]; then
-        return 0
-    fi
+create_config_files() {
+    print_status "Criando arquivos de configuração..."
     
-    print_status "Configurando API Backend..."
-    
-    # Cria arquivo de configuração
+    # Configuração da API
     cat > "$CONFIG_DIR/api.env" << EOF
-# Configurações da API XUI ONE VODs Sync
+# Configurações da API
 API_ENV=production
 API_HOST=0.0.0.0
 API_PORT=$API_PORT
-API_WORKERS=4
-API_RELOAD=false
-API_LOG_LEVEL=info
+API_KEY=xui_sync_$(generate_password)_key
 
-# Banco de Dados
+# Banco local do sincronizador
 DB_HOST=localhost
 DB_PORT=3306
-DB_NAME=$DATABASE_NAME
-DB_USER=$DATABASE_USER
-DB_PASSWORD=$DB_PASSWORD
+DB_NAME=xui_sync_manager
+DB_USER=xui_sync_user
+DB_PASSWORD=$MYSQL_LOCAL_PASS
 
 # Segurança
-API_KEY=$API_KEY
-JWT_SECRET_KEY=$(generate_random_password 32)
+JWT_SECRET=$(generate_password)
 JWT_ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=30
+ACCESS_TOKEN_EXPIRE_MINUTES=1440
 
-# URLs
-XUI_ONE_URL=http://localhost:8000
-XUI_ONE_USERNAME=admin
-XUI_ONE_PASSWORD=admin
-
-# Sincronização
-SYNC_INTERVAL=3600
-MAX_SYNC_WORKERS=3
-DEFAULT_LANGUAGE=pt-BR
+# Admin padrão
+ADMIN_USERNAME=$ADMIN_USER
+ADMIN_PASSWORD=$ADMIN_PASS
 
 # Logs
-LOG_DIR=$LOG_DIR/api
-LOG_FILE=api.log
-LOG_ROTATION_SIZE=10MB
-LOG_RETENTION_DAYS=30
-
-# Redis (para Celery)
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_DB=0
-
-# Configurações de CORS
-CORS_ORIGINS=["http://localhost:8080","http://127.0.0.1:8080"]
+LOG_DIR=$LOG_DIR
+LOG_LEVEL=info
 EOF
-    
-    # Cria arquivo principal da API
-    cat > "$INSTALL_DIR/api/main.py" << 'EOF'
-#!/usr/bin/env python3
-"""
-API Principal - XUI ONE VODs Sync
-Ponto de entrada da aplicação
-"""
-import os
-import sys
-import logging
-from pathlib import Path
 
-# Adiciona diretório pai ao path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from app.core.config import settings
-from app.main import app
-
-if __name__ == "__main__":
-    import uvicorn
-    
-    logging.basicConfig(
-        level=getattr(logging, settings.LOG_LEVEL.upper()),
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    uvicorn.run(
-        "app.main:app",
-        host=settings.API_HOST,
-        port=settings.API_PORT,
-        workers=settings.API_WORKERS,
-        reload=settings.API_RELOAD,
-        log_level=settings.LOG_LEVEL.lower()
-    )
+    # Configuração do Web
+    cat > "$CONFIG_DIR/web.env" << EOF
+WEB_PORT=$WEB_PORT
+API_URL=http://localhost:$API_PORT
+SESSION_SECRET=$(generate_password)
+SITE_NAME=XUI ONE VODs Sync
 EOF
+
+    print_success "Configurações criadas"
+}
+
+create_api_structure() {
+    print_status "Criando estrutura da API..."
     
-    # Cria estrutura completa da API
+    # Estrutura principal
     mkdir -p "$INSTALL_DIR/api/app"
     mkdir -p "$INSTALL_DIR/api/app/core"
     mkdir -p "$INSTALL_DIR/api/app/api"
-    mkdir -p "$INSTALL_DIR/api/app/api/v1"
-    mkdir -p "$INSTALL_DIR/api/app/api/v1/endpoints"
     mkdir -p "$INSTALL_DIR/api/app/models"
     mkdir -p "$INSTALL_DIR/api/app/schemas"
     mkdir -p "$INSTALL_DIR/api/app/services"
     mkdir -p "$INSTALL_DIR/api/app/utils"
     mkdir -p "$INSTALL_DIR/api/app/db"
+    mkdir -p "$INSTALL_DIR/api/static"
+    mkdir -p "$INSTALL_DIR/api/templates"
     
-    # Cria arquivo __init__.py para cada diretório
-    for dir in "$INSTALL_DIR/api/app" "$INSTALL_DIR/api/app/core" \
-               "$INSTALL_DIR/api/app/api" "$INSTALL_DIR/api/app/api/v1" \
-               "$INSTALL_DIR/api/app/api/v1/endpoints" "$INSTALL_DIR/api/app/models" \
-               "$INSTALL_DIR/api/app/schemas" "$INSTALL_DIR/api/app/services" \
-               "$INSTALL_DIR/api/app/utils" "$INSTALL_DIR/api/app/db"; do
-        touch "$dir/__init__.py"
-    done
-    
-    # Cria arquivo de configurações
-    cat > "$INSTALL_DIR/api/app/core/config.py" << 'EOF'
-"""
-Configurações da aplicação
-"""
-import os
-from typing import List, Optional
-from pydantic_settings import BaseSettings
-from dotenv import load_dotenv
-
-load_dotenv()
-
-class Settings(BaseSettings):
-    # API
-    API_ENV: str = os.getenv("API_ENV", "development")
-    API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
-    API_PORT: int = int(os.getenv("API_PORT", 8001))
-    API_WORKERS: int = int(os.getenv("API_WORKERS", 4))
-    API_RELOAD: bool = os.getenv("API_RELOAD", "false").lower() == "true"
-    API_KEY: str = os.getenv("API_KEY", "")
-    
-    # Banco de Dados
-    DB_HOST: str = os.getenv("DB_HOST", "localhost")
-    DB_PORT: int = int(os.getenv("DB_PORT", 3306))
-    DB_USER: str = os.getenv("DB_USER", "xui_one_vods_user")
-    DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
-    DB_NAME: str = os.getenv("DB_NAME", "xui_one_vods")
-    
-    # Segurança
-    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "")
-    JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30))
-    
-    # URLs
-    XUI_ONE_URL: str = os.getenv("XUI_ONE_URL", "http://localhost:8000")
-    XUI_ONE_USERNAME: str = os.getenv("XUI_ONE_USERNAME", "admin")
-    XUI_ONE_PASSWORD: str = os.getenv("XUI_ONE_PASSWORD", "admin")
-    
-    # Sincronização
-    SYNC_INTERVAL: int = int(os.getenv("SYNC_INTERVAL", 3600))
-    MAX_SYNC_WORKERS: int = int(os.getenv("MAX_SYNC_WORKERS", 3))
-    DEFAULT_LANGUAGE: str = os.getenv("DEFAULT_LANGUAGE", "pt-BR")
-    
-    # Logs
-    LOG_DIR: str = os.getenv("LOG_DIR", "/var/log/xui-one-vods-sync/api")
-    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "info")
-    LOG_FILE: str = os.getenv("LOG_FILE", "api.log")
-    
-    # CORS
-    CORS_ORIGINS: List[str] = os.getenv("CORS_ORIGINS", "http://localhost:8080").split(",")
-    
-    # Redis
-    REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
-    REDIS_PORT: int = int(os.getenv("REDIS_PORT", 6379))
-    REDIS_DB: int = int(os.getenv("REDIS_DB", 0))
-    
-    # Caminhos
-    DATA_DIR: str = "/opt/xui-one-vods-sync/data"
-    BACKUP_DIR: str = "/opt/xui-one-vods-sync/backups"
-    
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
-
-settings = Settings()
-EOF
-    
-    # Cria arquivo principal da aplicação
-    cat > "$INSTALL_DIR/api/app/main.py" << 'EOF'
-"""
-Aplicação FastAPI principal
-"""
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+    # Arquivo principal da API
+    cat > "$INSTALL_DIR/api/main.py" << 'EOF'
+from fastapi import FastAPI, Request, Depends, HTTPException, status
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-from contextlib import asynccontextmanager
-
-from app.core.config import settings
-from app.api.v1.api import api_router
-from app.core.logging import setup_logging
-from app.db.session import engine, Base
-
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import mysql.connector
+from mysql.connector import Error
 import logging
+import json
+import hashlib
+import secrets
+from datetime import datetime
+from typing import Dict, List, Optional
+from pydantic import BaseModel
+import os
+from pathlib import Path
+
+# Configuração
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Lifespan events for the application
-    """
-    # Startup
-    logger.info("Starting XUI ONE VODs Sync API")
-    logger.info(f"Environment: {settings.API_ENV}")
-    logger.info(f"Database: {settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}")
-    
-    # Create database tables
-    try:
-        Base.metadata.create_all(bind=engine)
-        logger.info("Database tables created/verified")
-    except Exception as e:
-        logger.error(f"Error creating database tables: {e}")
-    
-    yield
-    
-    # Shutdown
-    logger.info("Shutting down XUI ONE VODs Sync API")
+app = FastAPI(title="XUI ONE VODs Sync API", version="3.0.0")
 
-# Create FastAPI app
-app = FastAPI(
-    title="XUI ONE VODs Sync API",
-    description="API for synchronizing VODs with XUI ONE panel",
-    version="2.0.0",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json",
-    lifespan=lifespan
-)
-
-# Setup CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Include API router
-app.include_router(api_router, prefix="/api/v1")
-
-# Mount static files
+# Templates
+templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-@app.get("/")
-async def root():
-    return {
-        "message": "XUI ONE VODs Sync API",
-        "version": "2.0.0",
-        "docs": "/api/docs",
-        "health": "/api/v1/health"
-    }
+# Banco de dados local do sincronizador
+def get_local_db():
+    conn = mysql.connector.connect(
+        host="localhost",
+        user="xui_sync_user",
+        password=os.getenv("DB_PASSWORD", ""),
+        database="xui_sync_manager"
+    )
+    return conn
+
+# Models
+class XUIConnection(BaseModel):
+    id: str
+    name: str
+    host: str
+    port: int = 3306
+    username: str
+    password: str
+    database: str = "xui"
+    is_active: bool = True
+    created_at: str
+
+class User(BaseModel):
+    id: int
+    username: str
+    password_hash: str
+    is_admin: bool = False
+
+# Banco de dados inicial
+def init_database():
+    conn = get_local_db()
+    cursor = conn.cursor()
+    
+    # Tabela de conexões XUI ONE
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS xui_connections (
+            id VARCHAR(50) PRIMARY KEY,
+            name VARCHAR(100) NOT NULL,
+            host VARCHAR(100) NOT NULL,
+            port INT DEFAULT 3306,
+            username VARCHAR(100) NOT NULL,
+            password VARCHAR(255) NOT NULL,
+            database VARCHAR(100) DEFAULT 'xui',
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # Tabela de usuários
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            username VARCHAR(50) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            is_admin BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # Tabela de logs de sincronização
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sync_logs (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            connection_id VARCHAR(50),
+            action VARCHAR(50),
+            items_processed INT,
+            items_added INT,
+            items_updated INT,
+            status VARCHAR(20),
+            error_message TEXT,
+            started_at TIMESTAMP,
+            completed_at TIMESTAMP
+        )
+    """)
+    
+    # Insere admin padrão se não existir
+    cursor.execute("SELECT COUNT(*) FROM users WHERE username = 'admin'")
+    if cursor.fetchone()[0] == 0:
+        import hashlib
+        password_hash = hashlib.sha256('admin123'.encode()).hexdigest()
+        cursor.execute(
+            "INSERT INTO users (username, password_hash, is_admin) VALUES (%s, %s, %s)",
+            ('admin', password_hash, True)
+        )
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+# Inicializa banco
+init_database()
+
+# Funções de autenticação
+def verify_password(plain_password, hashed_password):
+    return hashlib.sha256(plain_password.encode()).hexdigest() == hashed_password
+
+def get_user(username: str):
+    conn = get_local_db()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
+    user = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return user
+
+# Rotas
+@app.get("/", response_class=HTMLResponse)
+async def login_page(request: Request):
+    return templates.TemplateResponse("login.html", {"request": request})
+
+@app.post("/login")
+async def login(request: Request):
+    form = await request.form()
+    username = form.get("username")
+    password = form.get("password")
+    
+    user = get_user(username)
+    if not user or not verify_password(password, user['password_hash']):
+        return RedirectResponse("/?error=1", status_code=302)
+    
+    # Cria token de sessão
+    token = secrets.token_hex(32)
+    response = RedirectResponse("/dashboard", status_code=302)
+    response.set_cookie(key="session_token", value=token, httponly=True)
+    
+    # Salva sessão (em produção, use Redis)
+    conn = get_local_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO user_sessions (user_id, token) VALUES (%s, %s)",
+        (user['id'], token)
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+    
+    return response
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    token = request.cookies.get("session_token")
+    if not token:
+        return RedirectResponse("/", status_code=302)
+    
+    return templates.TemplateResponse("dashboard.html", {"request": request})
+
+# API para gerenciar conexões XUI ONE
+@app.get("/api/connections")
+async def get_connections():
+    conn = get_local_db()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT id, name, host, port, database, is_active FROM xui_connections")
+    connections = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return {"connections": connections}
+
+@app.post("/api/connections")
+async def create_connection(connection: dict):
+    conn = get_local_db()
+    cursor = conn.cursor()
+    
+    connection_id = secrets.token_hex(8)
+    cursor.execute(
+        """INSERT INTO xui_connections 
+           (id, name, host, port, username, password, database, is_active) 
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+        (connection_id, connection['name'], connection['host'], connection['port'],
+         connection['username'], connection['password'], connection['database'], True)
+    )
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+    
+    return {"id": connection_id, "message": "Conexão criada"}
+
+@app.post("/api/connections/{connection_id}/test")
+async def test_connection(connection_id: str):
+    conn = get_local_db()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM xui_connections WHERE id = %s", (connection_id,))
+    connection = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    
+    if not connection:
+        raise HTTPException(status_code=404, detail="Conexão não encontrada")
+    
+    try:
+        # Tenta conectar ao banco remoto do XUI ONE
+        remote_conn = mysql.connector.connect(
+            host=connection['host'],
+            port=connection['port'],
+            user=connection['username'],
+            password=connection['password'],
+            database=connection['database']
+        )
+        
+        cursor = remote_conn.cursor()
+        
+        # Verifica se é banco do XUI ONE
+        cursor.execute("SHOW TABLES LIKE 'streams'")
+        has_streams = cursor.fetchone() is not None
+        
+        cursor.execute("SHOW TABLES LIKE 'categories'")
+        has_categories = cursor.fetchone() is not None
+        
+        cursor.close()
+        remote_conn.close()
+        
+        return {
+            "success": True,
+            "is_xui_database": has_streams or has_categories,
+            "has_streams": has_streams,
+            "has_categories": has_categories
+        }
+        
+    except Error as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@app.post("/api/connections/{connection_id}/sync")
+async def sync_connection(connection_id: str):
+    conn = get_local_db()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM xui_connections WHERE id = %s", (connection_id,))
+    connection = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    
+    if not connection:
+        raise HTTPException(status_code=404, detail="Conexão não encontrada")
+    
+    try:
+        # Conecta ao banco remoto do XUI ONE
+        remote_conn = mysql.connector.connect(
+            host=connection['host'],
+            port=connection['port'],
+            user=connection['username'],
+            password=connection['password'],
+            database=connection['database']
+        )
+        
+        cursor = remote_conn.cursor(dictionary=True)
+        
+        # Sincroniza categorias
+        cursor.execute("SELECT * FROM categories")
+        categories = cursor.fetchall()
+        
+        # Sincroniza streams (VODs)
+        cursor.execute("""
+            SELECT * FROM streams 
+            WHERE stream_type = 'movie' OR stream_type = 'series'
+        """)
+        vods = cursor.fetchall()
+        
+        cursor.close()
+        remote_conn.close()
+        
+        # Aqui você processaria os dados e salvaria localmente
+        # Por enquanto, só retorna as contagens
+        
+        return {
+            "success": True,
+            "categories_count": len(categories),
+            "vods_count": len(vods),
+            "message": f"Encontrados {len(categories)} categorias e {len(vods)} VODs"
+        }
+        
+    except Error as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 @app.get("/health")
-async def health_check():
-    return {"status": "healthy", "service": "xui-one-vods-api"}
+async def health():
+    return {"status": "healthy", "service": "xui-vods-sync"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8001)
 EOF
+
+    # Templates HTML
+    mkdir -p "$INSTALL_DIR/api/templates"
     
-    # Cria systemd service para a API
+    # Template de login
+    cat > "$INSTALL_DIR/api/templates/login.html" << 'EOF'
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XUI ONE VODs Sync - Login</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            display: flex;
+            align-items: center;
+        }
+        .login-container {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            max-width: 400px;
+            width: 100%;
+            padding: 40px;
+        }
+        .brand {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .brand h2 {
+            color: #333;
+            font-weight: bold;
+        }
+        .brand p {
+            color: #666;
+            font-size: 14px;
+        }
+        .form-control {
+            padding: 12px;
+            border-radius: 5px;
+        }
+        .btn-login {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            color: white;
+            padding: 12px;
+            border-radius: 5px;
+            font-weight: bold;
+            width: 100%;
+        }
+        .alert {
+            margin-top: 15px;
+        }
+        .features {
+            margin-top: 30px;
+            font-size: 12px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="row justify-content-center">
+            <div class="col-md-4">
+                <div class="login-container">
+                    <div class="brand">
+                        <h2>🎬 XUI ONE VODs Sync</h2>
+                        <p>Sincronizador de Catálogo Remoto</p>
+                    </div>
+                    
+                    {% if error %}
+                    <div class="alert alert-danger">
+                        Usuário ou senha incorretos
+                    </div>
+                    {% endif %}
+                    
+                    <form method="post" action="/login">
+                        <div class="mb-3">
+                            <label class="form-label">Usuário</label>
+                            <input type="text" name="username" class="form-control" required 
+                                   placeholder="Digite seu usuário">
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">Senha</label>
+                            <input type="password" name="password" class="form-control" required 
+                                   placeholder="Digite sua senha">
+                        </div>
+                        
+                        <button type="submit" class="btn btn-login">
+                            🔐 Entrar no Sistema
+                        </button>
+                    </form>
+                    
+                    <div class="features mt-4">
+                        <p><strong>Credenciais padrão:</strong></p>
+                        <p>Usuário: <code>admin</code></p>
+                        <p>Senha: <code>admin123</code></p>
+                        <p class="mt-3"><small>Após login, configure a conexão com o banco do XUI ONE</small></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+EOF
+
+    # Template do dashboard
+    cat > "$INSTALL_DIR/api/templates/dashboard.html" << 'EOF'
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - XUI ONE VODs Sync</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --primary-color: #667eea;
+            --secondary-color: #764ba2;
+        }
+        body {
+            background-color: #f8f9fa;
+        }
+        .sidebar {
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            color: white;
+            min-height: 100vh;
+            position: fixed;
+            width: 250px;
+        }
+        .sidebar-header {
+            padding: 20px;
+            text-align: center;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .nav-link {
+            color: rgba(255,255,255,0.8);
+            padding: 12px 20px;
+            border-left: 4px solid transparent;
+            transition: all 0.3s;
+        }
+        .nav-link:hover, .nav-link.active {
+            color: white;
+            background: rgba(255,255,255,0.1);
+            border-left-color: white;
+        }
+        .nav-link i {
+            width: 25px;
+        }
+        .main-content {
+            margin-left: 250px;
+            padding: 20px;
+        }
+        .card-dashboard {
+            border: none;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.05);
+            transition: transform 0.3s;
+        }
+        .card-dashboard:hover {
+            transform: translateY(-5px);
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            border: none;
+        }
+        .connection-status {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+        .status-connected { background-color: #28a745; }
+        .status-disconnected { background-color: #dc3545; }
+        .status-testing { background-color: #ffc107; }
+    </style>
+</head>
+<body>
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <h4><i class="fas fa-film"></i> XUI ONE Sync</h4>
+            <p class="small mb-0">v3.0.0</p>
+        </div>
+        
+        <nav class="nav flex-column mt-4">
+            <a class="nav-link active" href="#">
+                <i class="fas fa-tachometer-alt"></i> Dashboard
+            </a>
+            <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#addConnectionModal">
+                <i class="fas fa-database"></i> Nova Conexão XUI
+            </a>
+            <a class="nav-link" href="#" id="connectionsTab">
+                <i class="fas fa-server"></i> Conexões XUI ONE
+            </a>
+            <a class="nav-link" href="#">
+                <i class="fas fa-sync-alt"></i> Sincronizar
+            </a>
+            <a class="nav-link" href="#">
+                <i class="fas fa-history"></i> Logs
+            </a>
+            <a class="nav-link" href="#">
+                <i class="fas fa-cog"></i> Configurações
+            </a>
+            <a class="nav-link" href="/logout" style="margin-top: 50px;">
+                <i class="fas fa-sign-out-alt"></i> Sair
+            </a>
+        </nav>
+    </div>
+    
+    <!-- Main Content -->
+    <div class="main-content">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h3>Dashboard</h3>
+            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addConnectionModal">
+                <i class="fas fa-plus me-2"></i> Nova Conexão XUI ONE
+            </button>
+        </div>
+        
+        <!-- Stats -->
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card card-dashboard">
+                    <div class="card-body">
+                        <h6 class="text-muted">Conexões XUI</h6>
+                        <h2 id="connectionsCount">0</h2>
+                        <small class="text-muted">Servidores configurados</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card card-dashboard">
+                    <div class="card-body">
+                        <h6 class="text-muted">VODs Sincronizados</h6>
+                        <h2 id="vodsCount">0</h2>
+                        <small class="text-muted">Total de itens</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card card-dashboard">
+                    <div class="card-body">
+                        <h6 class="text-muted">Última Sinc.</h6>
+                        <h2 id="lastSync">-</h2>
+                        <small class="text-muted">há --</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card card-dashboard">
+                    <div class="card-body">
+                        <h6 class="text-muted">Status</h6>
+                        <h2 id="systemStatus">🟢</h2>
+                        <small class="text-muted">Sistema operacional</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Conexões XUI ONE -->
+        <div class="card card-dashboard">
+            <div class="card-header">
+                <h5 class="mb-0">Conexões com XUI ONE</h5>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover" id="connectionsTable">
+                        <thead>
+                            <tr>
+                                <th>Nome</th>
+                                <th>Host/IP</th>
+                                <th>Banco</th>
+                                <th>Status</th>
+                                <th>Última Sinc.</th>
+                                <th>Ações</th>
+                            </tr>
+                        </thead>
+                        <tbody id="connectionsList">
+                            <!-- Lista será preenchida por JavaScript -->
+                        </tbody>
+                    </table>
+                </div>
+                
+                <div class="text-center py-5" id="noConnections">
+                    <i class="fas fa-database fa-3x text-muted mb-3"></i>
+                    <h5 class="text-muted">Nenhuma conexão configurada</h5>
+                    <p class="text-muted">Clique em "Nova Conexão XUI ONE" para começar</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Instruções -->
+        <div class="card card-dashboard mt-4">
+            <div class="card-header">
+                <h5 class="mb-0">Como configurar conexão com XUI ONE</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <h6><i class="fas fa-info-circle text-primary me-2"></i>Informações necessárias:</h6>
+                        <ul>
+                            <li><strong>IP/Host:</strong> Endereço da máquina onde o XUI ONE está instalado</li>
+                            <li><strong>Porta MySQL:</strong> Normalmente 3306</li>
+                            <li><strong>Usuário MySQL:</strong> Usuário do banco do XUI ONE</li>
+                            <li><strong>Senha MySQL:</strong> Senha do banco do XUI ONE</li>
+                            <li><strong>Nome do banco:</strong> Normalmente "xui"</li>
+                        </ul>
+                    </div>
+                    <div class="col-md-6">
+                        <h6><i class="fas fa-shield-alt text-success me-2"></i>Requisitos:</h6>
+                        <ul>
+                            <li>O MySQL do XUI ONE deve permitir conexões remotas</li>
+                            <li>Firewall deve permitir acesso à porta 3306</li>
+                            <li>Usuário MySQL deve ter permissões de leitura</li>
+                            <li>Conexão de rede entre as máquinas</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Modal: Adicionar Conexão -->
+    <div class="modal fade" id="addConnectionModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Nova Conexão XUI ONE</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="connectionForm">
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Nome da Conexão *</label>
+                                <input type="text" class="form-control" name="name" 
+                                       placeholder="Ex: Servidor Principal XUI" required>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Host/IP *</label>
+                                <input type="text" class="form-control" name="host" 
+                                       placeholder="Ex: 192.168.1.100 ou xui.meuserver.com" required>
+                            </div>
+                        </div>
+                        
+                        <div class="row">
+                            <div class="col-md-3 mb-3">
+                                <label class="form-label">Porta MySQL</label>
+                                <input type="number" class="form-control" name="port" value="3306">
+                            </div>
+                            <div class="col-md-5 mb-3">
+                                <label class="form-label">Usuário MySQL *</label>
+                                <input type="text" class="form-control" name="username" 
+                                       placeholder="Usuário do banco XUI" required>
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label">Senha *</label>
+                                <input type="password" class="form-control" name="password" required>
+                            </div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">Nome do Banco</label>
+                            <input type="text" class="form-control" name="database" value="xui">
+                            <small class="text-muted">Normalmente "xui" para XUI ONE</small>
+                        </div>
+                        
+                        <div class="alert alert-info">
+                            <i class="fas fa-info-circle me-2"></i>
+                            <strong>Importante:</strong> Certifique-se que o MySQL do XUI ONE permite conexões remotas
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button type="button" class="btn btn-success" id="testConnectionBtn">
+                        <i class="fas fa-vial me-1"></i> Testar Conexão
+                    </button>
+                    <button type="button" class="btn btn-primary" id="saveConnectionBtn">
+                        <i class="fas fa-save me-1"></i> Salvar Conexão
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script>
+        $(document).ready(function() {
+            loadConnections();
+            
+            // Testar conexão
+            $('#testConnectionBtn').click(function() {
+                const formData = {
+                    name: $('input[name="name"]').val(),
+                    host: $('input[name="host"]').val(),
+                    port: $('input[name="port"]').val(),
+                    username: $('input[name="username"]').val(),
+                    password: $('input[name="password"]').val(),
+                    database: $('input[name="database"]').val()
+                };
+                
+                // Validação básica
+                if (!formData.host || !formData.username || !formData.password) {
+                    alert('Preencha os campos obrigatórios: Host, Usuário e Senha');
+                    return;
+                }
+                
+                // Simula teste de conexão
+                $('#testConnectionBtn').html('<i class="fas fa-spinner fa-spin me-1"></i> Testando...');
+                
+                // Em produção, aqui seria uma chamada AJAX para a API
+                setTimeout(function() {
+                    $('#testConnectionBtn').html('<i class="fas fa-vial me-1"></i> Testar Conexão');
+                    alert('Funcionalidade de teste será implementada na API\n\n' +
+                          'A API testará:\n' +
+                          '1. Conexão com MySQL remoto\n' +
+                          '2. Verificação se é banco XUI ONE\n' +
+                          '3. Permissões de leitura');
+                }, 1000);
+            });
+            
+            // Salvar conexão
+            $('#saveConnectionBtn').click(function() {
+                const formData = {
+                    name: $('input[name="name"]').val(),
+                    host: $('input[name="host"]').val(),
+                    port: $('input[name="port"]').val() || 3306,
+                    username: $('input[name="username"]').val(),
+                    password: $('input[name="password"]').val(),
+                    database: $('input[name="database"]').val() || 'xui'
+                };
+                
+                // Validação
+                if (!formData.name || !formData.host || !formData.username || !formData.password) {
+                    alert('Preencha todos os campos obrigatórios');
+                    return;
+                }
+                
+                // Salva via API
+                $.ajax({
+                    url: '/api/connections',
+                    method: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify(formData),
+                    success: function(response) {
+                        alert('Conexão salva com sucesso! ID: ' + response.id);
+                        $('#addConnectionModal').modal('hide');
+                        loadConnections();
+                    },
+                    error: function() {
+                        alert('Erro ao salvar conexão. Verifique se a API está rodando.');
+                    }
+                });
+            });
+        });
+        
+        function loadConnections() {
+            $.ajax({
+                url: '/api/connections',
+                method: 'GET',
+                success: function(response) {
+                    const connections = response.connections || [];
+                    const tbody = $('#connectionsList');
+                    const noConnections = $('#noConnections');
+                    const countElement = $('#connectionsCount');
+                    
+                    countElement.text(connections.length);
+                    
+                    if (connections.length === 0) {
+                        tbody.hide();
+                        noConnections.show();
+                        return;
+                    }
+                    
+                    noConnections.hide();
+                    tbody.show().empty();
+                    
+                    connections.forEach(conn => {
+                        const row = `
+                            <tr>
+                                <td><strong>${conn.name}</strong></td>
+                                <td>${conn.host}:${conn.port}</td>
+                                <td>${conn.database}</td>
+                                <td>
+                                    <span class="connection-status ${conn.is_active ? 'status-connected' : 'status-disconnected'}"></span>
+                                    ${conn.is_active ? 'Conectado' : 'Desconectado'}
+                                </td>
+                                <td>-</td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-primary me-1" onclick="testConnection('${conn.id}')">
+                                        <i class="fas fa-vial"></i>
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-success" onclick="syncConnection('${conn.id}')">
+                                        <i class="fas fa-sync-alt"></i>
+                                    </button>
+                                </td>
+                            </tr>
+                        `;
+                        tbody.append(row);
+                    });
+                }
+            });
+        }
+        
+        function testConnection(connectionId) {
+            $.ajax({
+                url: `/api/connections/${connectionId}/test`,
+                method: 'POST',
+                success: function(response) {
+                    if (response.success) {
+                        alert(`✅ Conexão bem-sucedida!\n\n` +
+                              `É banco XUI ONE: ${response.is_xui_database ? 'Sim' : 'Não'}\n` +
+                              `Tem tabela streams: ${response.has_streams ? 'Sim' : 'Não'}\n` +
+                              `Tem tabela categories: ${response.has_categories ? 'Sim' : 'Não'}`);
+                    } else {
+                        alert(`❌ Falha na conexão:\n${response.error}`);
+                    }
+                }
+            });
+        }
+        
+        function syncConnection(connectionId) {
+            if (!confirm('Iniciar sincronização com este servidor XUI ONE?')) return;
+            
+            $.ajax({
+                url: `/api/connections/${connectionId}/sync`,
+                method: 'POST',
+                success: function(response) {
+                    if (response.success) {
+                        alert(`✅ Sincronização iniciada!\n\n` +
+                              `Categorias encontradas: ${response.categories_count}\n` +
+                              `VODs encontrados: ${response.vods_count}\n\n` +
+                              `${response.message}`);
+                    } else {
+                        alert(`❌ Erro na sincronização:\n${response.error}`);
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>
+EOF
+
+    print_success "Estrutura da API criada"
+}
+
+create_systemd_service() {
+    print_status "Criando serviços systemd..."
+    
+    # Serviço da API
     cat > /etc/systemd/system/xui-vods-api.service << EOF
 [Unit]
 Description=XUI ONE VODs Sync API
@@ -803,519 +1132,30 @@ User=$SERVICE_USER
 Group=$SERVICE_USER
 WorkingDirectory=$INSTALL_DIR/api
 EnvironmentFile=$CONFIG_DIR/api.env
-ExecStart=$INSTALL_DIR/venv/bin/python -m uvicorn app.main:app --host \${API_HOST} --port \${API_PORT}
+ExecStart=$INSTALL_DIR/venv/bin/python main.py
 Restart=always
 RestartSec=10
 StandardOutput=append:$LOG_DIR/api.log
 StandardError=append:$LOG_DIR/api-error.log
 
-# Security
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=$LOG_DIR $INSTALL_DIR/data
-
 [Install]
 WantedBy=multi-user.target
 EOF
-    
-    # Cria script de inicialização da API
-    cat > "$INSTALL_DIR/scripts/start_api.sh" << 'EOF'
-#!/bin/bash
-# Script para iniciar a API
 
-source /opt/xui-one-vods-sync/venv/bin/activate
-cd /opt/xui-one-vods-sync/api
-
-# Carrega variáveis de ambiente
-if [ -f /etc/xui-one-vods-sync/api.env ]; then
-    export $(cat /etc/xui-one-vods-sync/api.env | grep -v '^#' | xargs)
-fi
-
-# Executa a API
-exec python -m uvicorn app.main:app --host $API_HOST --port $API_PORT --workers $API_WORKERS
-EOF
-    
-    chmod +x "$INSTALL_DIR/scripts/start_api.sh"
-    
-    print_success "API Backend configurada"
+    print_success "Serviço systemd criado"
 }
 
-setup_web_panel() {
-    if [[ "$INSTALL_TYPE" == "api-only" ]]; then
-        return 0
-    fi
-    
-    print_status "Configurando Painel Web..."
-    
-    # Cria arquivo de configuração do painel web
-    cat > "$CONFIG_DIR/web.env" << EOF
-# Configurações do Painel Web
-WEB_PORT=$WEB_PORT
-API_URL=http://localhost:$API_PORT
-API_KEY=$API_KEY
-SESSION_SECRET=$(generate_random_password 32)
-
-# Configurações de UI
-SITE_NAME=XUI ONE VODs Sync
-SITE_DESCRIPTION=Sistema de Sincronização de VODs
-DEFAULT_THEME=dark
-
-# Configurações de Email
-SMTP_HOST=localhost
-SMTP_PORT=25
-SMTP_USER=
-SMTP_PASSWORD=
-EMAIL_FROM=noreply@localhost
-
-# Configurações de Backup
-BACKUP_ENABLED=true
-BACKUP_SCHEDULE="0 2 * * *"
-BACKUP_RETENTION_DAYS=30
-EOF
-    
-    # Cria estrutura do painel web
-    cat > "$INSTALL_DIR/web/package.json" << 'EOF'
-{
-  "name": "xui-one-vods-panel",
-  "version": "2.0.0",
-  "description": "Painel de administração para XUI ONE VODs Sync",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js",
-    "build": "webpack --mode production",
-    "install-deps": "npm install"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "express-session": "^1.17.3",
-    "connect-redis": "^7.0.0",
-    "redis": "^4.6.7",
-    "axios": "^1.6.0",
-    "bcryptjs": "^2.4.3",
-    "dotenv": "^16.3.1",
-    "ejs": "^3.1.9",
-    "helmet": "^7.0.0",
-    "morgan": "^1.10.0",
-    "cors": "^2.8.5",
-    "compression": "^1.7.4",
-    "express-rate-limit": "^6.10.0",
-    "express-validator": "^7.0.1",
-    "multer": "^1.4.5-lts.1",
-    "jsonwebtoken": "^9.0.2",
-    "winston": "^3.10.0",
-    "socket.io": "^4.7.2",
-    "socket.io-client": "^4.7.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1",
-    "webpack": "^5.88.2",
-    "webpack-cli": "^5.1.4",
-    "css-loader": "^6.8.1",
-    "style-loader": "^3.3.3",
-    "file-loader": "^6.2.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  },
-  "author": "XUI ONE Team",
-  "license": "MIT"
-}
-EOF
-    
-    # Cria servidor web básico
-    cat > "$INSTALL_DIR/web/server.js" << 'EOF'
-const express = require('express');
-const path = require('path');
-const helmet = require('helmet');
-const cors = require('cors');
-const morgan = require('morgan');
-const compression = require('compression');
-require('dotenv').config();
-
-const app = express();
-const PORT = process.env.WEB_PORT || 8080;
-
-// Middleware
-app.use(helmet());
-app.use(cors());
-app.use(compression());
-app.use(morgan('combined'));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// Configurações
-app.set('view engine', 'ejs');
-app.set('views', path.join(__dirname, 'views'));
-
-// Servir arquivos estáticos
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Rotas básicas
-app.get('/', (req, res) => {
-  res.render('index', {
-    title: 'XUI ONE VODs Sync',
-    apiUrl: process.env.API_URL || 'http://localhost:8001'
-  });
-});
-
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    service: 'xui-one-vods-web',
-    version: '2.0.0'
-  });
-});
-
-// Inicia servidor
-app.listen(PORT, () => {
-  console.log(`XUI ONE VODs Web Panel running on port ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`API URL: ${process.env.API_URL || 'Not configured'}`);
-});
-EOF
-    
-    # Cria arquivo HTML/EJS básico
-    mkdir -p "$INSTALL_DIR/web/views"
-    cat > "$INSTALL_DIR/web/views/index.ejs" << 'EOF'
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><%= title %> - Painel de Controle</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <style>
-        :root {
-            --primary-color: #3498db;
-            --dark-bg: #1a1a2e;
-        }
-        body {
-            background-color: #f8f9fa;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        }
-        .login-container {
-            max-width: 400px;
-            margin: 100px auto;
-            padding: 30px;
-            background: white;
-            border-radius: 10px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-        }
-        .brand-title {
-            color: var(--primary-color);
-            font-weight: bold;
-            margin-bottom: 30px;
-        }
-        .btn-primary {
-            background-color: var(--primary-color);
-            border-color: var(--primary-color);
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="login-container">
-            <h2 class="text-center brand-title">
-                <i class="fas fa-film"></i> XUI ONE VODs
-            </h2>
-            <p class="text-center text-muted mb-4">Sincronizador de Catálogo</p>
-            
-            <div class="text-center mb-4">
-                <div class="spinner-border text-primary" role="status">
-                    <span class="visually-hidden">Carregando...</span>
-                </div>
-                <p class="mt-2">Inicializando sistema...</p>
-            </div>
-            
-            <div id="loginForm" style="display: none;">
-                <form id="loginFormElement">
-                    <div class="mb-3">
-                        <label for="username" class="form-label">Usuário</label>
-                        <input type="text" class="form-control" id="username" required>
-                    </div>
-                    <div class="mb-3">
-                        <label for="password" class="form-label">Senha</label>
-                        <input type="password" class="form-control" id="password" required>
-                    </div>
-                    <div class="d-grid">
-                        <button type="submit" class="btn btn-primary">
-                            <i class="fas fa-sign-in-alt me-2"></i> Entrar
-                        </button>
-                    </div>
-                </form>
-            </div>
-        </div>
-    </div>
-    
-    <script>
-        // Verifica status da API
-        async function checkAPIStatus() {
-            try {
-                const response = await fetch('<%= apiUrl %>/health');
-                if (response.ok) {
-                    document.querySelector('.spinner-border').style.display = 'none';
-                    document.getElementById('loginForm').style.display = 'block';
-                    document.querySelector('.text-center p').textContent = 'Sistema pronto para uso';
-                }
-            } catch (error) {
-                setTimeout(checkAPIStatus, 3000);
-            }
-        }
-        
-        // Inicia verificação
-        checkAPIStatus();
-        
-        // Formulário de login
-        document.getElementById('loginFormElement')?.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            // Implementar login
-            alert('Sistema em desenvolvimento. Use as credenciais padrão.');
-        });
-    </script>
-</body>
-</html>
-EOF
-    
-    # Cria systemd service para o painel web
-    cat > /etc/systemd/system/xui-vods-web.service << EOF
-[Unit]
-Description=XUI ONE VODs Sync Web Panel
-After=network.target xui-vods-api.service
-Requires=xui-vods-api.service
-
-[Service]
-Type=simple
-User=$SERVICE_USER
-Group=$SERVICE_USER
-WorkingDirectory=$INSTALL_DIR/web
-EnvironmentFile=$CONFIG_DIR/web.env
-ExecStart=/usr/bin/node server.js
-Restart=always
-RestartSec=10
-StandardOutput=append:$LOG_DIR/web.log
-StandardError=append:$LOG_DIR/web-error.log
-
-# Security
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=$LOG_DIR $INSTALL_DIR/web/uploads
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    
-    # Instala dependências Node.js
-    print_status "Instalando dependências Node.js..."
-    cd "$INSTALL_DIR/web"
-    npm install --production
-    
-    print_success "Painel Web configurado"
-}
-
-setup_nginx_config() {
-    if [[ "$INSTALL_NGINX" == false ]] && [[ "$INSTALL_TYPE" != "full" ]]; then
-        return 0
-    fi
-    
+setup_nginx() {
     print_status "Configurando Nginx..."
     
-    # Remove configuração padrão
-    rm -f /etc/nginx/sites-enabled/default
-    
-    if [[ "$ENABLE_SSL" == true ]] && [[ -n "$DOMAIN_NAME" ]]; then
-        # Configuração com SSL
-        cat > /etc/nginx/sites-available/xui-vods-sync << EOF
-# XUI ONE VODs Sync - Nginx Configuration with SSL
-upstream api_backend {
-    server 127.0.0.1:$API_PORT;
-    keepalive 32;
-}
-
-upstream web_frontend {
-    server 127.0.0.1:$WEB_PORT;
-    keepalive 32;
-}
-
-# HTTP Redirect to HTTPS
-server {
-    listen 80;
-    listen [::]:80;
-    server_name $DOMAIN_NAME;
-    
-    # ACME Challenge for Let's Encrypt
-    location /.well-known/acme-challenge/ {
-        root /var/www/html;
-    }
-    
-    location / {
-        return 301 https://\$server_name\$request_uri;
-    }
-}
-
-# HTTPS Server
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name $DOMAIN_NAME;
-    
-    # SSL Configuration
-    ssl_certificate /etc/letsencrypt/live/$DOMAIN_NAME/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN_NAME/privkey.pem;
-    ssl_trusted_certificate /etc/letsencrypt/live/$DOMAIN_NAME/chain.pem;
-    
-    # SSL Protocols
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-RSA-AES256-GCM-SHA512:DHE-RSA-AES256-GCM-SHA512:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES256-GCM-SHA384;
-    ssl_prefer_server_ciphers off;
-    
-    # SSL Session
-    ssl_session_timeout 1d;
-    ssl_session_cache shared:SSL:50m;
-    ssl_session_tickets off;
-    
-    # OCSP Stapling
-    ssl_stapling on;
-    ssl_stapling_verify on;
-    
-    # Security Headers
-    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
-    add_header X-Frame-Options DENY always;
-    add_header X-Content-Type-Options nosniff always;
-    add_header Referrer-Policy strict-origin-when-cross-origin always;
-    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
-    
-    # Root location
-    root /var/www/html;
-    index index.html;
-    
-    # API Proxy
-    location /api/ {
-        proxy_pass http://api_backend;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_cache_bypass \$http_upgrade;
-        proxy_read_timeout 300s;
-        proxy_connect_timeout 75s;
-        
-        # CORS
-        add_header 'Access-Control-Allow-Origin' '*' always;
-        add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
-        add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
-        
-        if (\$request_method = 'OPTIONS') {
-            add_header 'Access-Control-Allow-Origin' '*';
-            add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS';
-            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization';
-            add_header 'Access-Control-Max-Age' 1728000;
-            add_header 'Content-Type' 'text/plain; charset=utf-8';
-            add_header 'Content-Length' 0;
-            return 204;
-        }
-    }
-    
-    # Web Panel Proxy
-    location / {
-        proxy_pass http://web_frontend;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_cache_bypass \$http_upgrade;
-        
-        # Compression
-        gzip on;
-        gzip_vary on;
-        gzip_min_length 1024;
-        gzip_types text/plain text/css text/xml text/javascript application/javascript application/xml+rss application/json;
-    }
-    
-    # Static Files
-    location /static/ {
-        alias $INSTALL_DIR/api/static/;
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-    
-    # Logs
-    access_log /var/log/nginx/xui-vods-access.log;
-    error_log /var/log/nginx/xui-vods-error.log;
-}
-EOF
-    else
-        # Configuração sem SSL (HTTP apenas)
-        cat > /etc/nginx/sites-available/xui-vods-sync << EOF
-# XUI ONE VODs Sync - Nginx Configuration (HTTP)
-upstream api_backend {
-    server 127.0.0.1:$API_PORT;
-    keepalive 32;
-}
-
-upstream web_frontend {
-    server 127.0.0.1:$WEB_PORT;
-    keepalive 32;
-}
-
+    cat > /etc/nginx/sites-available/xui-vods-sync << EOF
 server {
     listen 80;
     listen [::]:80;
     server_name _;
     
-    # Security Headers
-    add_header X-Frame-Options DENY always;
-    add_header X-Content-Type-Options nosniff always;
-    add_header Referrer-Policy strict-origin-when-cross-origin always;
-    
-    # Root location
-    root /var/www/html;
-    index index.html;
-    
-    # API Proxy
-    location /api/ {
-        proxy_pass http://api_backend;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_cache_bypass \$http_upgrade;
-        proxy_read_timeout 300s;
-        proxy_connect_timeout 75s;
-        
-        # CORS
-        add_header 'Access-Control-Allow-Origin' '*' always;
-        add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
-        add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
-        
-        if (\$request_method = 'OPTIONS') {
-            add_header 'Access-Control-Allow-Origin' '*';
-            add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS';
-            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization';
-            add_header 'Access-Control-Max-Age' 1728000;
-            add_header 'Content-Type' 'text/plain; charset=utf-8';
-            add_header 'Content-Length' 0;
-            return 204;
-        }
-    }
-    
-    # Web Panel Proxy
     location / {
-        proxy_pass http://web_frontend;
+        proxy_pass http://127.0.0.1:$API_PORT;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'upgrade';
@@ -1326,564 +1166,226 @@ server {
         proxy_cache_bypass \$http_upgrade;
     }
     
-    # Static Files
-    location /static/ {
-        alias $INSTALL_DIR/api/static/;
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-    
-    # Logs
     access_log /var/log/nginx/xui-vods-access.log;
     error_log /var/log/nginx/xui-vods-error.log;
 }
 EOF
-    fi
-    
-    # Habilita o site
+
     ln -sf /etc/nginx/sites-available/xui-vods-sync /etc/nginx/sites-enabled/
+    rm -f /etc/nginx/sites-enabled/default
     
-    # Testa configuração do Nginx
     nginx -t
-    
     print_success "Nginx configurado"
 }
 
-setup_ssl_certificate() {
-    if [[ "$ENABLE_SSL" != true ]] || [[ -z "$DOMAIN_NAME" ]] || [[ -z "$EMAIL" ]]; then
-        return 0
-    fi
-    
-    print_status "Configurando certificado SSL com Let's Encrypt..."
-    
-    # Instala Certbot
-    apt-get install -y certbot python3-certbot-nginx
-    
-    # Obtém certificado
-    certbot certonly --nginx --non-interactive --agree-tos \
-        --email "$EMAIL" \
-        -d "$DOMAIN_NAME" \
-        --redirect \
-        --hsts \
-        --uir \
-        --staple-ocsp
-    
-    # Configura renovação automática
-    echo "0 12 * * * root certbot renew --quiet --post-hook 'systemctl reload nginx'" > /etc/cron.d/certbot-renew
-    
-    print_success "Certificado SSL configurado"
-}
-
 setup_firewall() {
-    print_status "Configurando firewall (UFW)..."
+    print_status "Configurando firewall..."
     
-    # Instala UFW se não estiver instalado
-    if ! command -v ufw &> /dev/null; then
-        apt-get install -y ufw
-    fi
-    
-    # Configura regras básicas
-    ufw --force reset
-    ufw default deny incoming
-    ufw default allow outgoing
-    
-    # Portas necessárias
+    apt-get install -y ufw
+    ufw --force enable
     ufw allow ssh
     ufw allow http
     ufw allow https
-    
-    if [[ "$INSTALL_TYPE" == "full" || "$INSTALL_API" == true ]]; then
-        ufw allow "$API_PORT/tcp"
-    fi
-    
-    if [[ "$INSTALL_TYPE" == "full" || "$INSTALL_WEB" == true ]]; then
-        ufw allow "$WEB_PORT/tcp"
-    fi
-    
-    # Habilita UFW
-    ufw --force enable
-    
-    # Verifica status
-    ufw status verbose
+    ufw allow $API_PORT/tcp
     
     print_success "Firewall configurado"
 }
 
-setup_redis() {
-    print_status "Configurando Redis..."
+create_util_scripts() {
+    print_status "Criando scripts utilitários..."
     
-    # Instala Redis
-    apt-get install -y redis-server
-    
-    # Configura Redis
-    sed -i 's/supervised no/supervised systemd/' /etc/redis/redis.conf
-    sed -i 's/# maxmemory <bytes>/maxmemory 256mb/' /etc/redis/redis.conf
-    sed -i 's/# maxmemory-policy noeviction/maxmemory-policy allkeys-lru/' /etc/redis/redis.conf
-    
-    # Reinicia Redis
-    systemctl restart redis-server
-    systemctl enable redis-server
-    
-    print_success "Redis configurado"
-}
-
-setup_backup_system() {
-    print_status "Configurando sistema de backup..."
-    
-    # Cria script de backup
-    cat > "$INSTALL_DIR/scripts/backup.sh" << EOF
+    # Script de status
+    cat > "$INSTALL_DIR/scripts/status.sh" << 'EOF'
 #!/bin/bash
-# Script de backup para XUI ONE VODs Sync
+echo "=== STATUS XUI ONE VODs Sync ==="
+echo ""
+echo "Serviços:"
+echo "---------"
+systemctl status xui-vods-api --no-pager | grep -E "Active:|Main PID:"
+echo ""
+echo "Portas:"
+echo "-------"
+netstat -tlnp | grep -E ":80|:$API_PORT" || echo "Portas não encontradas"
+echo ""
+echo "Logs recentes:"
+echo "--------------"
+tail -20 /var/log/xui-one-vods-sync/api.log 2>/dev/null || echo "Log não encontrado"
+EOF
 
+    # Script de backup
+    cat > "$INSTALL_DIR/scripts/backup.sh" << 'EOF'
+#!/bin/bash
 BACKUP_DIR="$INSTALL_DIR/backups"
-LOG_FILE="$LOG_DIR/backup.log"
 DATE=\$(date +%Y%m%d_%H%M%S)
-BACKUP_FILE="xui-vods-backup_\$DATE.tar.gz"
-RETENTION_DAYS=30
+BACKUP_FILE="backup_\$DATE.tar.gz"
 
-# Cria backup
-echo "\$(date): Iniciando backup" >> "\$LOG_FILE"
+echo "Criando backup..."
+mkdir -p "\$BACKUP_DIR"
 
-# Backup do banco de dados
-mysqldump -u$DATABASE_USER -p$DB_PASSWORD $DATABASE_NAME > /tmp/db_backup.sql
+# Backup do banco
+mysqldump -u xui_sync_user -p$MYSQL_LOCAL_PASS xui_sync_manager > /tmp/db_backup.sql
 
 # Cria arquivo compactado
 tar -czf "\$BACKUP_DIR/\$BACKUP_FILE" \
     -C /tmp db_backup.sql \
-    -C "$CONFIG_DIR" . \
-    -C "$INSTALL_DIR/data" .
+    -C "$CONFIG_DIR" .
 
-# Limpa backup temporário
 rm -f /tmp/db_backup.sql
-
-# Remove backups antigos
-find "\$BACKUP_DIR" -name "xui-vods-backup_*.tar.gz" -mtime +\$RETENTION_DAYS -delete
-
-echo "\$(date): Backup concluído: \$BACKUP_FILE" >> "\$LOG_FILE"
+echo "Backup criado: \$BACKUP_DIR/\$BACKUP_FILE"
 EOF
-    
-    chmod +x "$INSTALL_DIR/scripts/backup.sh"
-    
-    # Configura cron job para backup diário
-    echo "0 2 * * * $SERVICE_USER $INSTALL_DIR/scripts/backup.sh" > /etc/cron.d/xui-vods-backup
-    
-    print_success "Sistema de backup configurado"
-}
 
-setup_monitoring() {
-    print_status "Configurando monitoramento..."
-    
-    # Instala ferramentas de monitoramento
-    apt-get install -y htop net-tools
-    
-    # Cria script de status
-    cat > "$INSTALL_DIR/scripts/status.sh" << 'EOF'
+    # Script de restore
+    cat > "$INSTALL_DIR/scripts/restore.sh" << 'EOF'
 #!/bin/bash
-# Script para verificar status do sistema
+if [ -z "\$1" ]; then
+    echo "Uso: \$0 <arquivo_backup.tar.gz>"
+    exit 1
+fi
 
-echo "=== XUI ONE VODs Sync Status ==="
-echo "Data/Hora: $(date)"
-echo ""
+BACKUP_FILE="\$1"
+TEMP_DIR="/tmp/restore_\$(date +%s)"
 
-# Verifica serviços
-echo "1. Serviços do Sistema:"
-systemctl is-active --quiet xui-vods-api && echo "  API: ✅ Ativo" || echo "  API: ❌ Inativo"
-systemctl is-active --quiet xui-vods-web && echo "  Web: ✅ Ativo" || echo "  Web: ❌ Inativo"
-systemctl is-active --quiet mysql && echo "  MySQL: ✅ Ativo" || echo "  MySQL: ❌ Inativo"
-systemctl is-active --quiet nginx && echo "  Nginx: ✅ Ativo" || echo "  Nginx: ❌ Inativo"
-systemctl is-active --quiet redis-server && echo "  Redis: ✅ Ativo" || echo "  Redis: ❌ Inativo"
-echo ""
+echo "Restaurando backup..."
+mkdir -p "\$TEMP_DIR"
+tar -xzf "\$BACKUP_FILE" -C "\$TEMP_DIR"
 
-# Verifica portas
-echo "2. Portas em Uso:"
-netstat -tlnp | grep -E ":$API_PORT|:$WEB_PORT|:80|:443|:3306|:6379"
-echo ""
+# Restaura banco
+if [ -f "\$TEMP_DIR/db_backup.sql" ]; then
+    mysql -u xui_sync_user -p$MYSQL_LOCAL_PASS xui_sync_manager < "\$TEMP_DIR/db_backup.sql"
+fi
 
-# Verifica espaço em disco
-echo "3. Espaço em Disco:"
-df -h / /opt /var
-echo ""
+# Restaura configurações
+if [ -d "\$TEMP_DIR/etc" ]; then
+    cp -r "\$TEMP_DIR/etc/xui-one-vods-sync/"* "$CONFIG_DIR/"
+fi
 
-# Verifica logs recentes
-echo "4. Logs Recentes (últimas 10 linhas):"
-tail -10 /var/log/xui-one-vods-sync/api.log 2>/dev/null || echo "  Log da API não encontrado"
+rm -rf "\$TEMP_DIR"
+echo "Backup restaurado! Reinicie os serviços."
 EOF
-    
-    chmod +x "$INSTALL_DIR/scripts/status.sh"
-    
-    # Cria script de diagnóstico
-    cat > "$INSTALL_DIR/scripts/diagnose.sh" << 'EOF'
-#!/bin/bash
-# Script de diagnóstico do sistema
 
-LOG_DIR="/var/log/xui-one-vods-sync"
-DIAG_FILE="$LOG_DIR/diagnose_$(date +%Y%m%d_%H%M%S).log"
-
-{
-    echo "=== Diagnóstico XUI ONE VODs Sync ==="
-    echo "Data/Hora: $(date)"
-    echo ""
-    
-    echo "1. Informações do Sistema:"
-    uname -a
-    echo ""
-    
-    echo "2. Uso de Memória:"
-    free -h
-    echo ""
-    
-    echo "3. Uso de CPU:"
-    top -bn1 | head -20
-    echo ""
-    
-    echo "4. Serviços:"
-    systemctl list-units --type=service | grep -E "xui|mysql|nginx|redis"
-    echo ""
-    
-    echo "5. Logs de Erro (últimas 50 linhas):"
-    journalctl -u xui-vods-api -u xui-vods-web --since "1 hour ago" -n 50
-    echo ""
-    
-    echo "6. Conexões de Rede:"
-    ss -tulpn | grep -E ":$API_PORT|:$WEB_PORT"
-    echo ""
-    
-    echo "7. Permissões de Diretórios:"
-    ls -la /opt/xui-one-vods-sync/
-    echo ""
-    
-    echo "8. Configurações:"
-    echo "API_PORT: $API_PORT"
-    echo "WEB_PORT: $WEB_PORT"
-    echo "DB_HOST: localhost"
-    echo ""
-    
-} > "$DIAG_FILE"
-
-echo "Diagnóstico salvo em: $DIAG_FILE"
-cat "$DIAG_FILE"
-EOF
-    
-    chmod +x "$INSTALL_DIR/scripts/diagnose.sh"
-    
-    print_success "Monitoramento configurado"
+    chmod +x "$INSTALL_DIR/scripts/"*.sh
+    print_success "Scripts criados"
 }
 
 start_services() {
     print_status "Iniciando serviços..."
     
-    # Recarrega systemd
     systemctl daemon-reload
+    systemctl enable xui-vods-api
+    systemctl start xui-vods-api
+    systemctl restart nginx
     
-    # Habilita e inicia serviços
-    if [[ "$INSTALL_TYPE" == "full" || "$INSTALL_API" == true ]]; then
-        systemctl enable xui-vods-api
-        systemctl start xui-vods-api
-        sleep 3
-        
-        # Verifica status
-        if systemctl is-active --quiet xui-vods-api; then
-            print_success "API Backend iniciada"
-        else
-            print_error "Falha ao iniciar API Backend"
-            journalctl -u xui-vods-api -n 20 --no-pager
-        fi
-    fi
+    sleep 3
     
-    if [[ "$INSTALL_TYPE" == "full" || "$INSTALL_WEB" == true ]]; then
-        systemctl enable xui-vods-web
-        systemctl start xui-vods-web
-        sleep 2
-        
-        if systemctl is-active --quiet xui-vods-web; then
-            print_success "Painel Web iniciado"
-        else
-            print_error "Falha ao iniciar Painel Web"
-            journalctl -u xui-vods-web -n 20 --no-pager
-        fi
-    fi
-    
-    if [[ "$INSTALL_TYPE" == "full" || "$INSTALL_NGINX" == true ]]; then
-        systemctl enable nginx
-        systemctl restart nginx
-        
-        if systemctl is-active --quiet nginx; then
-            print_success "Nginx iniciado"
-        else
-            print_error "Falha ao iniciar Nginx"
-            nginx -t
-        fi
-    fi
-    
-    if [[ "$INSTALL_TYPE" == "full" || "$INSTALL_MYSQL" == true ]]; then
-        systemctl enable mysql
-        systemctl restart mysql
-        print_success "MySQL iniciado"
+    if systemctl is-active --quiet xui-vods-api; then
+        print_success "API iniciada com sucesso"
+    else
+        print_error "Falha ao iniciar API"
+        journalctl -u xui-vods-api -n 20
     fi
 }
 
-show_installation_summary() {
+show_summary() {
     print_header
-    echo -e "${GREEN}✅ INSTALAÇÃO CONCLUÍDA COM SUCESSO!${NC}"
+    echo -e "${GREEN}✅ INSTALAÇÃO CONCLUÍDA!${NC}"
     echo ""
-    echo "=============================================="
-    echo "         RESUMO DA INSTALAÇÃO"
-    echo "=============================================="
+    echo "=========================================="
+    echo "         XUI ONE VODs Sync v3.0"
+    echo "    Sincronizador com Conexão Remota"
+    echo "=========================================="
     echo ""
-    
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_API" == true ]] && \
-    echo "🌐 API Backend:"
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_API" == true ]] && \
-    echo "   URL: http://$(hostname -I | awk '{print $1}'):$API_PORT"
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_API" == true ]] && \
-    echo "   Documentação: http://$(hostname -I | awk '{print $1}'):$API_PORT/api/docs"
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_API" == true ]] && \
-    echo "   Chave API: $API_KEY"
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_API" == true ]] && echo ""
-    
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_WEB" == true ]] && \
-    echo "🖥️  Painel Web:"
-    if [[ "$ENABLE_SSL" == true ]] && [[ -n "$DOMAIN_NAME" ]]; then
-        [[ "$INSTALL_TYPE" == "full" || "$INSTALL_WEB" == true ]] && \
-        echo "   URL: https://$DOMAIN_NAME"
-    else
-        [[ "$INSTALL_TYPE" == "full" || "$INSTALL_WEB" == true ]] && \
-        echo "   URL: http://$(hostname -I | awk '{print $1}'):$WEB_PORT"
-    fi
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_WEB" == true ]] && echo ""
-    
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_MYSQL" == true ]] && \
-    echo "🗄️  Banco de Dados:"
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_MYSQL" == true ]] && \
-    echo "   Nome: $DATABASE_NAME"
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_MYSQL" == true ]] && \
-    echo "   Usuário: $DATABASE_USER"
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_MYSQL" == true ]] && \
-    echo "   Senha: $DB_PASSWORD"
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_MYSQL" == true ]] && echo ""
-    
-    echo "📁 Diretórios:"
+    echo "🌐 ACESSO AO SISTEMA:"
+    echo "   URL: http://$(curl -s ifconfig.me):$API_PORT"
+    echo "   Ou: http://seu-ip:$API_PORT"
+    echo ""
+    echo "🔐 LOGIN INICIAL:"
+    echo "   Usuário: $ADMIN_USER"
+    echo "   Senha: $ADMIN_PASS"
+    echo ""
+    echo "📋 CONFIGURAÇÃO DO XUI ONE REMOTO:"
+    echo "   1. Faça login no sistema"
+    echo "   2. Clique em 'Nova Conexão XUI ONE'"
+    echo "   3. Informe os dados do banco remoto:"
+    echo "      - IP da máquina do XUI ONE"
+    echo "      - Usuário MySQL do XUI ONE"
+    echo "      - Senha MySQL do XUI ONE"
+    echo "      - Porta MySQL (geralmente 3306)"
+    echo "      - Nome do banco (geralmente 'xui')"
+    echo ""
+    echo "⚙️  SERVIÇOS:"
+    echo "   Status: systemctl status xui-vods-api"
+    echo "   Logs: journalctl -u xui-vods-api -f"
+    echo "   Reiniciar: systemctl restart xui-vods-api"
+    echo ""
+    echo "📁 DIRETÓRIOS:"
     echo "   Instalação: $INSTALL_DIR"
-    echo "   Configuração: $CONFIG_DIR"
+    echo "   Configurações: $CONFIG_DIR"
     echo "   Logs: $LOG_DIR"
     echo "   Backups: $INSTALL_DIR/backups"
     echo ""
-    
-    echo "⚙️  Comandos Úteis:"
-    echo "   Verificar status: $INSTALL_DIR/scripts/status.sh"
-    echo "   Diagnóstico: $INSTALL_DIR/scripts/diagnose.sh"
-    echo "   Backup manual: $INSTALL_DIR/scripts/backup.sh"
+    echo "🔧 SCRIPTS ÚTEIS:"
+    echo "   Status: $INSTALL_DIR/scripts/status.sh"
+    echo "   Backup: $INSTALL_DIR/scripts/backup.sh"
+    echo "   Restore: $INSTALL_DIR/scripts/restore.sh"
     echo ""
-    echo "   Iniciar/Parar API: systemctl start|stop|restart xui-vods-api"
-    echo "   Iniciar/Parar Web: systemctl start|stop|restart xui-vods-web"
+    echo "⚠️  IMPORTANTE:"
+    echo "   1. Altere a senha do admin após primeiro login"
+    echo "   2. Configure backup regular"
+    echo "   3. O MySQL do XUI ONE deve permitir conexões remotas"
     echo ""
-    
-    echo "📋 Logs do Sistema:"
-    echo "   API: journalctl -u xui-vods-api -f"
-    echo "   Web: journalctl -u xui-vods-web -f"
-    echo "   Nginx: tail -f /var/log/nginx/xui-vods-*.log"
+    echo "=========================================="
     echo ""
     
-    echo "🔧 Arquivos de Configuração:"
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_API" == true ]] && \
-    echo "   API: $CONFIG_DIR/api.env"
-    [[ "$INSTALL_TYPE" == "full" || "$INSTALL_WEB" == true ]] && \
-    echo "   Web: $CONFIG_DIR/web.env"
-    echo ""
-    
-    echo "=============================================="
-    echo "👤 Credenciais Padrão:"
-    echo "   Painel Web: admin / admin123"
-    echo "   API: Use a chave API acima"
-    echo ""
-    echo "⚠️  ALTERE AS CREDENCIAIS PADRÃO IMEDIATAMENTE!"
-    echo "=============================================="
-    echo ""
-    
-    # Salva resumo em arquivo
-    cat > "$INSTALL_DIR/INSTALL_SUMMARY.txt" << EOF
-XUI ONE VODs Sync - Resumo da Instalação
-========================================
-Data da Instalação: $(date)
-Versão do Instalador: $SCRIPT_VERSION
+    # Salva informações em arquivo
+    cat > "$INSTALL_DIR/INSTALL_INFO.txt" << EOF
+XUI ONE VODs Sync - Informações da Instalação
+=============================================
+Data: $(date)
+Versão: 3.0.0
 
-CONFIGURAÇÕES:
----------------
-API Backend:
-  URL: http://$(hostname -I | awk '{print $1}'):$API_PORT
-  Docs: http://$(hostname -I | awk '{print $1}'):$API_PORT/api/docs
-  API Key: $API_KEY
+URL de Acesso: http://$(curl -s ifconfig.me):$API_PORT
+Login Inicial: $ADMIN_USER / $ADMIN_PASS
 
-Painel Web:
-  URL: $(if [[ "$ENABLE_SSL" == true ]] && [[ -n "$DOMAIN_NAME" ]]; then echo "https://$DOMAIN_NAME"; else echo "http://$(hostname -I | awk '{print $1}'):$WEB_PORT"; fi)
+Dados do MySQL Local:
+  Host: localhost
+  Usuário: xui_sync_user
+  Senha: $MYSQL_LOCAL_PASS
+  Banco: xui_sync_manager
 
-Banco de Dados:
-  Nome: $DATABASE_NAME
-  Usuário: $DATABASE_USER
-  Senha: $DB_PASSWORD
+Configuração de Conexão Remota:
+  1. Acesse o sistema
+  2. Clique em "Nova Conexão XUI ONE"
+  3. Informe dados do banco remoto do XUI ONE
 
-DIRETÓRIOS:
------------
-Instalação: $INSTALL_DIR
-Configuração: $CONFIG_DIR
-Logs: $LOG_DIR
-Backups: $INSTALL_DIR/backups
+Comandos Úteis:
+  systemctl status xui-vods-api
+  journalctl -u xui-vods-api -f
+  $INSTALL_DIR/scripts/status.sh
 
-COMANDOS ÚTEIS:
----------------
-Status: $INSTALL_DIR/scripts/status.sh
-Diagnóstico: $INSTALL_DIR/scripts/diagnose.sh
-Backup: $INSTALL_DIR/scripts/backup.sh
-
-SERVIÇOS:
----------
-API: systemctl start|stop|restart xui-vods-api
-Web: systemctl start|stop|restart xui-vods-web
-
-LOGS:
------
-API: journalctl -u xui-vods-api -f
-Web: journalctl -u xui-vods-web -f
-Nginx: tail -f /var/log/nginx/xui-vods-*.log
-
-CREDENCIAIS PADRÃO:
--------------------
-Painel Web: admin / admin123
-API: Use a chave API acima
-
-⚠️ IMPORTANTE: Altere as credenciais padrão imediatamente!
-
+⚠️ ALTERE A SENHA DO ADMIN IMEDIATAMENTE!
 EOF
     
-    echo "📄 Resumo salvo em: $INSTALL_DIR/INSTALL_SUMMARY.txt"
-    echo ""
-    
-    # Testa serviços
-    echo "🧪 Testando serviços..."
-    sleep 2
-    
-    # Testa API
-    if [[ "$INSTALL_TYPE" == "full" || "$INSTALL_API" == true ]]; then
-        if curl -s http://localhost:$API_PORT/health > /dev/null 2>&1; then
-            echo "✅ API está respondendo"
-        else
-            echo "⚠️  API não está respondendo, verifique os logs"
-        fi
-    fi
-    
-    # Testa Web
-    if [[ "$INSTALL_TYPE" == "full" || "$INSTALL_WEB" == true ]]; then
-        if curl -s http://localhost:$WEB_PORT/health > /dev/null 2>&1; then
-            echo "✅ Painel Web está respondendo"
-        else
-            echo "⚠️  Painel Web não está respondendo, verifique os logs"
-        fi
-    fi
-    
-    echo ""
-    echo "🎉 Instalação finalizada!"
-    echo ""
-    
-    # Mostra avisos importantes
-    print_warning "IMPORTANTE:"
-    echo "1. Altere as senhas padrão imediatamente"
-    echo "2. Configure o backup regular"
-    echo "3. Mantenha o sistema atualizado"
-    echo "4. Configure monitoramento"
-    echo ""
-}
-
-cleanup() {
-    print_status "Limpando arquivos temporários..."
-    
-    # Remove arquivos temporários
-    rm -f /tmp/mysql_secure_installation.sql
-    rm -f /tmp/create_database.sql
-    
-    # Limpa cache apt
-    apt-get autoremove -y
-    apt-get clean
-    
-    print_success "Limpeza concluída"
+    print_success "Informações salvas em: $INSTALL_DIR/INSTALL_INFO.txt"
 }
 
 main() {
     print_header
-    
-    # Verifica root
     check_root
-    
-    # Verifica sistema operacional
     check_os
-    
-    # Verifica dependências
-    check_dependencies
-    
-    # Obtém tipo de instalação
-    get_install_type
-    
-    # Obtém configurações
-    get_configuration
-    
-    # Atualiza sistema
     update_system
-    
-    # Instala MySQL
-    install_mysql
-    
-    # Instala Python
-    install_python_dependencies
-    
-    # Instala Nginx
+    install_mysql_local
+    install_python
     install_nginx
-    
-    # Instala Node.js
-    install_nodejs
-    
-    # Cria usuário de serviço
-    create_service_user
-    
-    # Cria diretórios
+    create_user
     setup_directories
-    
-    # Configura API
-    setup_api_backend
-    
-    # Configura Painel Web
-    setup_web_panel
-    
-    # Configura Redis
-    setup_redis
-    
-    # Configura Nginx
-    setup_nginx_config
-    
-    # Configura SSL
-    setup_ssl_certificate
-    
-    # Configura firewall
+    create_config_files
+    create_api_structure
+    create_systemd_service
+    setup_nginx
     setup_firewall
-    
-    # Configura backup
-    setup_backup_system
-    
-    # Configura monitoramento
-    setup_monitoring
-    
-    # Inicia serviços
+    create_util_scripts
     start_services
-    
-    # Limpeza
-    cleanup
-    
-    # Mostra resumo
-    show_installation_summary
-    
-    # Log da instalação
-    print_status "Log da instalação salvo em: $LOG_DIR/install.log"
+    show_summary
 }
 
-# Executa a instalação
 main 2>&1 | tee "$LOG_DIR/install.log"
-
-exit 0
