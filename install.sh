@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================
-# INSTALADOR COMPLETO VOD SYNC XUI - VERSÃO 4.0.0
+# INSTALADOR COMPLETO VOD SYNC XUI - VERSÃO 4.0.0 (CORRIGIDO)
 # Sistema completo de sincronização de VODs para X-UI
 # ============================================================
 
@@ -51,9 +51,9 @@ echo ""
 # 1. Limpar instalação anterior
 print_header "1. LIMPEZA DE INSTALAÇÃO ANTERIOR"
 print_step "Parando serviços anteriores..."
-systemctl stop vod-sync vod-sync-worker vod-sync-api 2>/dev/null || true
-systemctl disable vod-sync vod-sync-worker vod-sync-api 2>/dev/null || true
-rm -f /etc/systemd/system/vod-sync*.service
+systemctl stop vod-sync vod-sync-worker vod-sync-api vod-sync-scheduler 2>/dev/null || true
+systemctl disable vod-sync vod-sync-worker vod-sync-api vod-sync-scheduler 2>/dev/null || true
+rm -f /etc/systemd/system/vod-sync*.service /etc/systemd/system/vod-sync*.timer
 rm -rf "$INSTALL_DIR" 2>/dev/null || true
 print_success "Limpeza concluída"
 
@@ -84,16 +84,19 @@ apt-get install -y -qq \
     sqlite3 \
     rsync \
     inotify-tools \
-    pv
+    pv \
+    redis-server \
+    redis-tools
 
 print_success "Dependências instaladas"
 
 # 3. Criar estrutura de diretórios
 print_header "3. ESTRUTURA DE DIRETÓRIOS"
-mkdir -p "$INSTALL_DIR"/{src,logs,data,config,backup,scripts,templates,static,vods,temp,exports}
-mkdir -p "$INSTALL_DIR"/data/{database,sessions,thumbnails,metadata}
-mkdir -p "$INSTALL_DIR"/logs/{app,worker,nginx,cron,debug}
-mkdir -p "$INSTALL_DIR"/vods/{movies,series,originals,processed,queue}
+mkdir -p "$INSTALL_DIR"/{src,logs,data,config,backup,scripts,templates,static,vods,temp,exports,docs}
+mkdir -p "$INSTALL_DIR"/data/{database,sessions,thumbnails,metadata,cache}
+mkdir -p "$INSTALL_DIR"/logs/{app,worker,nginx,cron,debug,api}
+mkdir -p "$INSTALL_DIR"/vods/{movies,series,originals,processed,queue,tv_shows,documentaries}
+mkdir -p "$INSTALL_DIR"/src/{models,controllers,routes,utils,services,tasks,templates,static,commands,middleware}
 
 # Setar permissões
 chmod -R 755 "$INSTALL_DIR"
@@ -129,6 +132,12 @@ DB_CHARSET=utf8mb4
 
 # Banco de Dados SQLite (cache)
 SQLITE_PATH=$INSTALL_DIR/data/database/vod_cache.db
+
+# Redis (para Celery e cache)
+REDIS_URL=redis://localhost:6379/0
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
 
 # Paths
 BASE_DIR=$INSTALL_DIR
@@ -218,6 +227,14 @@ API_RATE_LIMIT=100
 API_TIMEOUT=30
 ENABLE_SWAGGER=true
 CORS_ORIGINS=*
+
+# Celery Config
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
+CELERY_ACCEPT_CONTENT=['json']
+CELERY_TASK_SERIALIZER='json'
+CELERY_RESULT_SERIALIZER='json'
+CELERY_TIMEZONE=America/Sao_Paulo
 EOF
 
 print_success "Arquivo .env criado"
@@ -324,7 +341,6 @@ Werkzeug==2.3.7
 PyMySQL==1.1.0
 SQLAlchemy==2.0.19
 alembic==1.12.0
-pymongo==4.5.0
 redis==5.0.0
 
 # Video Processing
@@ -341,7 +357,6 @@ requests==2.31.0
 aiohttp==3.9.0
 asyncio==3.4.3
 celery==5.3.4
-redis==5.0.0
 
 # API
 Flask-RESTful==0.3.10
@@ -361,7 +376,6 @@ ftputil==5.0.4
 
 # Monitoring
 prometheus-client==0.19.0
-flask-monitoringdashboard==5.0.0
 
 # Date & Time
 pytz==2023.3
@@ -377,6 +391,7 @@ Jinja2==3.1.2
 MarkupSafe==2.1.3
 WTForms==3.1.0
 Flask-WTF==1.2.1
+
 # Security
 cryptography==41.0.7
 bcrypt==4.1.2
@@ -406,28 +421,746 @@ print_success "Ambiente Python configurado"
 # 6. Criar aplicação Flask completa
 print_header "6. APLICAÇÃO FLASK COMPLETA"
 
-# Estrutura de diretórios da aplicação
-mkdir -p "$INSTALL_DIR/src"/{models,controllers,routes,utils,services,tasks,templates,static}
+# Criar __init__.py em todos os subdiretórios
+for dir in "$INSTALL_DIR/src"/*/; do
+    touch "$dir/__init__.py"
+done
 
-# Arquivo principal da aplicação
+# Criar o aplicativo Celery primeiro (necessário para o worker)
+cat > "$INSTALL_DIR/src/tasks/celery_app.py" << 'EOF'
+"""
+Configuração do Celery para tarefas assíncronas
+"""
+import os
+from celery import Celery
+from dotenv import load_dotenv
+
+# Carregar variáveis de ambiente
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env'))
+
+# Criar instância do Celery
+celery_app = Celery(
+    'vod_sync',
+    broker=os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0'),
+    backend=os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0'),
+    include=['src.tasks.vod_tasks', 'src.tasks.sync_tasks', 'src.tasks.notification_tasks']
+)
+
+# Configurações do Celery
+celery_app.conf.update(
+    task_serializer='json',
+    accept_content=['json'],
+    result_serializer='json',
+    timezone=os.getenv('CELERY_TIMEZONE', 'America/Sao_Paulo'),
+    enable_utc=True,
+    worker_max_tasks_per_child=1000,
+    worker_prefetch_multiplier=1,
+    task_acks_late=True,
+    broker_connection_retry_on_startup=True,
+    task_routes={
+        'src.tasks.vod_tasks.*': {'queue': 'vod'},
+        'src.tasks.sync_tasks.*': {'queue': 'sync'},
+        'src.tasks.notification_tasks.*': {'queue': 'notify'},
+    },
+    beat_schedule={
+        'periodic-sync': {
+            'task': 'src.tasks.sync_tasks.periodic_sync_task',
+            'schedule': int(os.getenv('SYNC_INTERVAL', 300)),
+        },
+        'cleanup-temp-files': {
+            'task': 'src.tasks.vod_tasks.cleanup_temp_files',
+            'schedule': 86400,  # Diário
+        },
+        'check-system-health': {
+            'task': 'src.tasks.sync_tasks.check_system_health',
+            'schedule': 300,  # A cada 5 minutos
+        },
+    }
+)
+
+if __name__ == '__main__':
+    celery_app.start()
+EOF
+
+# Criar tarefas para o Celery
+cat > "$INSTALL_DIR/src/tasks/vod_tasks.py" << 'EOF'
+"""
+Tarefas relacionadas a processamento de VODs
+"""
+import os
+import json
+import logging
+import shutil
+import hashlib
+from pathlib import Path
+from datetime import datetime
+from celery import shared_task
+from src.utils.vod_processor import VodProcessor
+
+logger = logging.getLogger(__name__)
+
+@shared_task(bind=True, max_retries=3)
+def process_vod_file(self, file_path: str, source_config: dict, metadata: dict = None):
+    """
+    Processar um arquivo VOD
+    """
+    try:
+        logger.info(f"Iniciando processamento de: {file_path}")
+        
+        # Verificar se arquivo existe
+        if not os.path.exists(file_path):
+            logger.error(f"Arquivo não encontrado: {file_path}")
+            raise FileNotFoundError(f"Arquivo não encontrado: {file_path}")
+        
+        # Criar processor
+        processor = VodProcessor(file_path, source_config)
+        
+        # Validar arquivo
+        if not processor.validate():
+            logger.warning(f"Arquivo inválido: {file_path}")
+            return {"status": "skipped", "reason": "invalid_file"}
+        
+        # Extrair metadados se não fornecidos
+        if metadata is None:
+            metadata = processor.extract_metadata()
+        
+        # Copiar para destino
+        destination = processor.get_destination_path(metadata)
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        
+        # Copiar arquivo
+        shutil.copy2(file_path, destination)
+        
+        # Criar thumbnails se configurado
+        if processor.config.get('create_thumbnails', True):
+            thumbnails = processor.create_thumbnails(destination)
+            metadata['thumbnails'] = thumbnails
+        
+        # Salvar metadados
+        metadata_path = destination + '.json'
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2, default=str)
+        
+        logger.info(f"VOD processado com sucesso: {file_path} -> {destination}")
+        
+        # Notificar sucesso
+        notify_vod_processed.delay(file_path, destination, metadata)
+        
+        return {
+            "status": "success",
+            "original_path": file_path,
+            "destination": destination,
+            "metadata": metadata,
+            "processed_at": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao processar VOD {file_path}: {e}")
+        self.retry(exc=e, countdown=60)
+        return {"status": "error", "error": str(e)}
+
+@shared_task
+def generate_thumbnails(vod_path: str, count: int = 3):
+    """
+    Gerar thumbnails para um VOD
+    """
+    try:
+        processor = VodProcessor(vod_path, {})
+        thumbnails = processor.create_thumbnails(vod_path, count)
+        return {"status": "success", "thumbnails": thumbnails}
+    except Exception as e:
+        logger.error(f"Erro ao gerar thumbnails para {vod_path}: {e}")
+        return {"status": "error", "error": str(e)}
+
+@shared_task
+def cleanup_temp_files():
+    """
+    Limpar arquivos temporários antigos
+    """
+    try:
+        temp_dir = Path(os.getenv('TEMP_PATH', '/tmp/vod-sync'))
+        if not temp_dir.exists():
+            return {"status": "skipped", "reason": "temp_dir_not_found"}
+        
+        # Remover arquivos com mais de 24 horas
+        removed = 0
+        for file_path in temp_dir.rglob('*'):
+            if file_path.is_file():
+                file_age = datetime.now().timestamp() - file_path.stat().st_mtime
+                if file_age > 86400:  # 24 horas
+                    file_path.unlink()
+                    removed += 1
+        
+        logger.info(f"Limpeza concluída: {removed} arquivos removidos")
+        return {"status": "success", "files_removed": removed}
+        
+    except Exception as e:
+        logger.error(f"Erro na limpeza de arquivos temporários: {e}")
+        return {"status": "error", "error": str(e)}
+
+@shared_task
+def scan_directory(directory: str, recursive: bool = True):
+    """
+    Escanear diretório em busca de VODs
+    """
+    try:
+        vod_files = []
+        patterns = ['*.mp4', '*.mkv', '*.avi', '*.mov', '*.flv']
+        
+        path_obj = Path(directory)
+        if not path_obj.exists():
+            return {"status": "error", "error": "Directory not found"}
+        
+        search_method = path_obj.rglob if recursive else path_obj.glob
+        
+        for pattern in patterns:
+            for file_path in search_method(pattern):
+                if file_path.is_file():
+                    vod_files.append(str(file_path))
+        
+        logger.info(f"Escaneamento concluído: {len(vod_files)} VODs encontrados em {directory}")
+        
+        return {
+            "status": "success",
+            "directory": directory,
+            "vod_count": len(vod_files),
+            "vod_files": vod_files[:100]  # Limitar a 100 para resposta
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao escanear diretório {directory}: {e}")
+        return {"status": "error", "error": str(e)}
+
+@shared_task
+def notify_vod_processed(original_path: str, destination: str, metadata: dict):
+    """
+    Notificar que um VOD foi processado
+    """
+    # Esta é uma tarefa de notificação placeholder
+    # Pode ser estendida para enviar emails, notificações push, etc.
+    logger.info(f"VOD processado: {original_path} -> {destination}")
+    return {"status": "notified", "timestamp": datetime.now().isoformat()}
+EOF
+
+cat > "$INSTALL_DIR/src/tasks/sync_tasks.py" << 'EOF'
+"""
+Tarefas de sincronização
+"""
+import os
+import json
+import logging
+from datetime import datetime
+from celery import shared_task, group
+from src.tasks.vod_tasks import process_vod_file, scan_directory
+
+logger = logging.getLogger(__name__)
+
+@shared_task(bind=True)
+def sync_source(self, source_config: dict):
+    """
+    Sincronizar uma fonte de VODs
+    """
+    try:
+        logger.info(f"Iniciando sincronização da fonte: {source_config.get('name', 'unknown')}")
+        
+        source_type = source_config.get('type', 'local')
+        
+        if source_type == 'local':
+            return sync_local_source(source_config)
+        elif source_type == 'ftp':
+            return sync_ftp_source(source_config)
+        elif source_type == 's3':
+            return sync_s3_source(source_config)
+        else:
+            logger.warning(f"Tipo de fonte não suportado: {source_type}")
+            return {"status": "error", "error": f"Tipo de fonte não suportado: {source_type}"}
+            
+    except Exception as e:
+        logger.error(f"Erro na sincronização da fonte: {e}")
+        return {"status": "error", "error": str(e)}
+
+@shared_task
+def sync_local_source(source_config: dict):
+    """
+    Sincronizar fonte local
+    """
+    try:
+        source_path = source_config.get('path', '')
+        if not source_path or not os.path.exists(source_path):
+            return {"status": "error", "error": f"Caminho não encontrado: {source_path}"}
+        
+        # Escanear diretório
+        scan_result = scan_directory.delay(source_path, source_config.get('recursive', True)).get()
+        
+        if scan_result['status'] != 'success':
+            return scan_result
+        
+        vod_files = scan_result.get('vod_files', [])
+        
+        # Processar cada arquivo em paralelo
+        tasks = []
+        for vod_file in vod_files:
+            task = process_vod_file.s(vod_file, source_config)
+            tasks.append(task)
+        
+        # Executar tarefas em grupo
+        if tasks:
+            job = group(tasks)
+            result = job.apply_async()
+            
+            # Aguardar resultados (opcional - pode ser assíncrono)
+            # results = result.get(disable_sync_subtasks=False)
+            
+            logger.info(f"Sincronização local iniciada: {len(vod_files)} arquivos")
+            
+            return {
+                "status": "started",
+                "source": source_config.get('name'),
+                "vod_count": len(vod_files),
+                "task_group_id": result.id
+            }
+        else:
+            return {
+                "status": "completed",
+                "source": source_config.get('name'),
+                "vod_count": 0,
+                "message": "Nenhum VOD encontrado"
+            }
+            
+    except Exception as e:
+        logger.error(f"Erro na sincronização local: {e}")
+        return {"status": "error", "error": str(e)}
+
+@shared_task
+def sync_ftp_source(source_config: dict):
+    """
+    Sincronizar fonte FTP (placeholder)
+    """
+    logger.warning("Sincronização FTP não implementada")
+    return {"status": "not_implemented", "source": source_config.get('name')}
+
+@shared_task
+def sync_s3_source(source_config: dict):
+    """
+    Sincronizar fonte S3 (placeholder)
+    """
+    logger.warning("Sincronização S3 não implementada")
+    return {"status": "not_implemented", "source": source_config.get('name')}
+
+@shared_task
+def periodic_sync_task():
+    """
+    Tarefa periódica de sincronização
+    """
+    try:
+        config_path = os.path.join(os.getenv('BASE_DIR', '/opt/vod-sync-xui'), 'config/sync_config.json')
+        
+        if not os.path.exists(config_path):
+            return {"status": "error", "error": "Config file not found"}
+        
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        sources = config.get('sync_config', {}).get('sources', [])
+        
+        # Filtrar fontes habilitadas
+        enabled_sources = [src for src in sources if src.get('enabled', True)]
+        
+        if not enabled_sources:
+            return {"status": "skipped", "reason": "no_enabled_sources"}
+        
+        # Executar sincronização para cada fonte
+        tasks = []
+        for source in enabled_sources:
+            task = sync_source.delay(source)
+            tasks.append(task.id)
+        
+        logger.info(f"Sincronização periódica iniciada: {len(tasks)} fontes")
+        
+        return {
+            "status": "started",
+            "timestamp": datetime.now().isoformat(),
+            "source_count": len(tasks),
+            "task_ids": tasks
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro na sincronização periódica: {e}")
+        return {"status": "error", "error": str(e)}
+
+@shared_task
+def check_system_health():
+    """
+    Verificar saúde do sistema
+    """
+    import psutil
+    import shutil
+    
+    try:
+        disk_usage = shutil.disk_usage(os.getenv('VOD_STORAGE_PATH', '/'))
+        memory = psutil.virtual_memory()
+        cpu_percent = psutil.cpu_percent(interval=1)
+        
+        health_data = {
+            "timestamp": datetime.now().isoformat(),
+            "cpu_percent": cpu_percent,
+            "memory_percent": memory.percent,
+            "disk_free_gb": disk_usage.free / (1024**3),
+            "disk_total_gb": disk_usage.total / (1024**3),
+            "disk_used_percent": (disk_usage.used / disk_usage.total) * 100,
+            "status": "healthy"
+        }
+        
+        # Verificar se há problemas
+        if cpu_percent > 90:
+            health_data["status"] = "warning"
+            health_data["issues"] = ["CPU usage high"]
+        
+        if memory.percent > 90:
+            health_data["status"] = "warning"
+            health_data.setdefault("issues", []).append("Memory usage high")
+        
+        if disk_usage.free < 5 * 1024**3:  # Menos de 5GB livres
+            health_data["status"] = "critical"
+            health_data.setdefault("issues", []).append("Low disk space")
+        
+        logger.debug(f"Verificação de saúde: {health_data['status']}")
+        
+        return health_data
+        
+    except Exception as e:
+        logger.error(f"Erro na verificação de saúde: {e}")
+        return {"status": "error", "error": str(e)}
+EOF
+
+cat > "$INSTALL_DIR/src/tasks/notification_tasks.py" << 'EOF'
+"""
+Tarefas de notificação
+"""
+import logging
+from datetime import datetime
+from celery import shared_task
+
+logger = logging.getLogger(__name__)
+
+@shared_task
+def send_email_notification(subject: str, message: str, recipient: str = None):
+    """
+    Enviar notificação por email (placeholder)
+    """
+    logger.info(f"Email notification: {subject} - {message[:50]}...")
+    # TODO: Implementar envio real de email
+    return {"status": "sent", "method": "email", "timestamp": datetime.now().isoformat()}
+
+@shared_task
+def send_telegram_notification(message: str, chat_id: str = None):
+    """
+    Enviar notificação por Telegram (placeholder)
+    """
+    logger.info(f"Telegram notification: {message[:50]}...")
+    # TODO: Implementar envio real para Telegram
+    return {"status": "sent", "method": "telegram", "timestamp": datetime.now().isoformat()}
+
+@shared_task
+def send_webhook_notification(url: str, data: dict):
+    """
+    Enviar notificação para webhook (placeholder)
+    """
+    import requests
+    try:
+        response = requests.post(url, json=data, timeout=10)
+        return {
+            "status": "sent",
+            "method": "webhook",
+            "status_code": response.status_code,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Erro ao enviar webhook: {e}")
+        return {"status": "error", "error": str(e)}
+EOF
+
+# Criar utilitários
+cat > "$INSTALL_DIR/src/utils/vod_processor.py" << 'EOF'
+"""
+Processador de arquivos VOD
+"""
+import os
+import json
+import hashlib
+import subprocess
+from pathlib import Path
+from datetime import datetime
+import pymediainfo
+
+class VodProcessor:
+    def __init__(self, file_path: str, source_config: dict = None):
+        self.file_path = file_path
+        self.source_config = source_config or {}
+        self.metadata = {}
+        
+    def validate(self) -> bool:
+        """Validar arquivo VOD"""
+        try:
+            # Verificar se arquivo existe
+            if not os.path.exists(self.file_path):
+                return False
+            
+            # Verificar tamanho mínimo
+            min_size = self.source_config.get('min_size', 10 * 1024 * 1024)  # 10MB padrão
+            file_size = os.path.getsize(self.file_path)
+            if file_size < min_size:
+                return False
+            
+            # Verificar extensão
+            allowed_extensions = self.source_config.get('allowed_extensions', ['mp4', 'mkv', 'avi', 'mov'])
+            file_ext = Path(self.file_path).suffix[1:].lower()
+            if file_ext not in allowed_extensions:
+                return False
+            
+            # Verificar se é um arquivo de vídeo válido (teste básico com ffprobe)
+            try:
+                cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name', '-of', 'default=noprint_wrappers=1:nokey=1', self.file_path]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                if result.returncode != 0:
+                    return False
+            except:
+                # Se ffprobe falhar, tentar com mediainfo
+                try:
+                    media_info = pymediainfo.MediaInfo.parse(self.file_path)
+                    if not media_info.tracks:
+                        return False
+                except:
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            print(f"Erro na validação: {e}")
+            return False
+    
+    def extract_metadata(self) -> dict:
+        """Extrair metadados do arquivo VOD"""
+        try:
+            file_path = Path(self.file_path)
+            
+            # Metadados básicos do arquivo
+            stat = file_path.stat()
+            self.metadata = {
+                'filename': file_path.name,
+                'file_size': stat.st_size,
+                'created_at': datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                'modified_at': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                'file_hash': self._calculate_file_hash(),
+                'path': str(file_path),
+                'extension': file_path.suffix[1:].lower()
+            }
+            
+            # Metadados do vídeo usando mediainfo
+            try:
+                media_info = pymediainfo.MediaInfo.parse(self.file_path)
+                
+                video_tracks = [track for track in media_info.tracks if track.track_type == 'Video']
+                audio_tracks = [track for track in media_info.tracks if track.track_type == 'Audio']
+                
+                if video_tracks:
+                    video = video_tracks[0]
+                    self.metadata.update({
+                        'duration': float(getattr(video, 'duration', 0)) / 1000,  # Converter para segundos
+                        'width': getattr(video, 'width', 0),
+                        'height': getattr(video, 'height', 0),
+                        'codec': getattr(video, 'codec_id', ''),
+                        'frame_rate': getattr(video, 'frame_rate', 0),
+                        'bitrate': getattr(video, 'bit_rate', 0),
+                        'resolution': f"{getattr(video, 'width', 0)}x{getattr(video, 'height', 0)}"
+                    })
+                
+                if audio_tracks:
+                    audio = audio_tracks[0]
+                    self.metadata.update({
+                        'audio_codec': getattr(audio, 'codec_id', ''),
+                        'audio_channels': getattr(audio, 'channel_s', 0),
+                        'audio_bitrate': getattr(audio, 'bit_rate', 0),
+                        'audio_sample_rate': getattr(audio, 'sampling_rate', 0)
+                    })
+                
+                # Informações gerais
+                general_tracks = [track for track in media_info.tracks if track.track_type == 'General']
+                if general_tracks:
+                    general = general_tracks[0]
+                    self.metadata.update({
+                        'format': getattr(general, 'format', ''),
+                        'overall_bitrate': getattr(general, 'overall_bit_rate', 0),
+                        'duration': float(getattr(general, 'duration', 0)) / 1000
+                    })
+                    
+            except Exception as e:
+                print(f"Erro ao extrair metadados com mediainfo: {e}")
+            
+            # Tentar extrair mais informações com ffprobe
+            try:
+                cmd = [
+                    'ffprobe', '-v', 'quiet', '-print_format', 'json',
+                    '-show_format', '-show_streams', self.file_path
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0:
+                    ffprobe_data = json.loads(result.stdout)
+                    self.metadata['ffprobe'] = ffprobe_data
+                    
+                    # Adicionar informações úteis do ffprobe
+                    if 'format' in ffprobe_data:
+                        format_info = ffprobe_data['format']
+                        self.metadata.update({
+                            'format_name': format_info.get('format_name', ''),
+                            'format_long_name': format_info.get('format_long_name', ''),
+                            'tags': format_info.get('tags', {})
+                        })
+                    
+            except Exception as e:
+                print(f"Erro ao extrair metadados com ffprobe: {e}")
+            
+            return self.metadata
+            
+        except Exception as e:
+            print(f"Erro geral na extração de metadados: {e}")
+            return self.metadata
+    
+    def create_thumbnails(self, video_path: str = None, count: int = 3) -> list:
+        """Criar thumbnails do vídeo"""
+        thumbnails = []
+        target_path = video_path or self.file_path
+        
+        try:
+            # Extrair duração do vídeo
+            cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', target_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            
+            if result.returncode != 0:
+                return thumbnails
+            
+            duration = float(result.stdout.strip())
+            
+            # Criar diretório para thumbnails
+            thumb_dir = Path(target_path).parent / 'thumbnails'
+            thumb_dir.mkdir(exist_ok=True)
+            
+            # Gerar thumbnails em intervalos regulares
+            for i in range(count):
+                # Calcular tempo para o thumbnail
+                time_point = duration * (i + 1) / (count + 1)
+                
+                # Nome do arquivo thumbnail
+                thumb_name = f"{Path(target_path).stem}_thumb_{i+1}.jpg"
+                thumb_path = thumb_dir / thumb_name
+                
+                # Gerar thumbnail com ffmpeg
+                cmd = [
+                    'ffmpeg', '-ss', str(time_point),
+                    '-i', target_path,
+                    '-vframes', '1',
+                    '-q:v', '2',
+                    '-vf', 'scale=320:-1',
+                    '-y',
+                    str(thumb_path)
+                ]
+                
+                subprocess.run(cmd, capture_output=True, timeout=30)
+                
+                if thumb_path.exists():
+                    thumbnails.append(str(thumb_path))
+            
+            return thumbnails
+            
+        except Exception as e:
+            print(f"Erro ao criar thumbnails: {e}")
+            return thumbnails
+    
+    def get_destination_path(self, metadata: dict = None) -> str:
+        """Gerar caminho de destino para o arquivo"""
+        if metadata is None:
+            metadata = self.metadata
+        
+        base_dir = os.getenv('VOD_STORAGE_PATH', '/opt/vod-sync-xui/vods')
+        organization = self.source_config.get('organization', 'category')
+        
+        filename = Path(self.file_path).name
+        
+        if organization == 'category':
+            # Tentar determinar categoria pelo nome ou metadados
+            category = self._guess_category(metadata)
+            return os.path.join(base_dir, category, filename)
+        
+        elif organization == 'date':
+            # Organizar por data
+            date_str = datetime.now().strftime('%Y/%m/%d')
+            return os.path.join(base_dir, date_str, filename)
+        
+        elif organization == 'type':
+            # Organizar por tipo (filme/série)
+            file_type = self._guess_file_type(metadata)
+            return os.path.join(base_dir, file_type, filename)
+        
+        else:
+            # Estrutura plana
+            return os.path.join(base_dir, filename)
+    
+    def _calculate_file_hash(self) -> str:
+        """Calcular hash do arquivo"""
+        sha256 = hashlib.sha256()
+        try:
+            with open(self.file_path, 'rb') as f:
+                for chunk in iter(lambda: f.read(4096), b''):
+                    sha256.update(chunk)
+            return sha256.hexdigest()
+        except:
+            return ''
+    
+    def _guess_category(self, metadata: dict) -> str:
+        """Tentar adivinhar a categoria do conteúdo"""
+        filename = metadata.get('filename', '').lower()
+        
+        if any(word in filename for word in ['movie', 'film', 'filme']):
+            return 'movies'
+        elif any(word in filename for word in ['series', 'season', 'episode', 'série']):
+            return 'series'
+        elif any(word in filename for word in ['documentary', 'documentario']):
+            return 'documentaries'
+        elif any(word in filename for word in ['tv', 'show']):
+            return 'tv_shows'
+        else:
+            return 'others'
+    
+    def _guess_file_type(self, metadata: dict) -> str:
+        """Tentar adivinhar o tipo de arquivo"""
+        duration = metadata.get('duration', 0)
+        
+        if duration > 3600:  # Mais de 1 hora
+            return 'movies'
+        elif 1200 < duration <= 3600:  # 20min a 1 hora
+            return 'episodes'
+        elif duration <= 1200:  # Até 20 minutos
+            return 'shorts'
+        else:
+            return 'unknown'
+EOF
+
+# Criar aplicação principal Flask
 cat > "$INSTALL_DIR/src/app.py" << 'EOF'
 """
 VOD Sync XUI - Aplicação Principal
-Sistema completo de gerenciamento e sincronização de VODs
 """
 import os
 import sys
 import logging
-from datetime import datetime
 from pathlib import Path
 
 # Adicionar diretório src ao path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, jsonify, render_template
 from flask_cors import CORS
-from flask_jwt_extended import JWTManager
-from flask_socketio import SocketIO
 from dotenv import load_dotenv
 
 # Carregar variáveis de ambiente
@@ -436,10 +1169,10 @@ load_dotenv(env_path)
 
 # Configurar logging
 logging.basicConfig(
-    level=getattr(logging, os.getenv('LOG_LEVEL', 'INFO')),
+    level=os.getenv('LOG_LEVEL', 'INFO'),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.getenv('LOG_PATH', '/var/log/vod-sync/app.log')),
+        logging.FileHandler(os.path.join(os.getenv('LOG_PATH', '/opt/vod-sync-xui/logs'), 'app.log')),
         logging.StreamHandler()
     ]
 )
@@ -449,163 +1182,101 @@ logger = logging.getLogger(__name__)
 def create_app():
     """Factory function para criar a aplicação Flask"""
     
-    app = Flask(__name__, 
-                template_folder='templates',
-                static_folder='static')
+    app = Flask(__name__)
     
     # Configurações básicas
     app.config.update(
         SECRET_KEY=os.getenv('SECRET_KEY', 'dev-secret-key'),
-        JWT_SECRET_KEY=os.getenv('SECRET_KEY', 'jwt-secret-key'),
-        JWT_ACCESS_TOKEN_EXPIRES=int(os.getenv('SESSION_TIMEOUT', 3600)),
-        MAX_CONTENT_LENGTH=int(os.getenv('MAX_FILE_SIZE', 10 * 1024 * 1024 * 1024)),
-        SQLALCHEMY_DATABASE_URI=f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}",
-        SQLALCHEMY_TRACK_MODIFICATIONS=False,
-        SQLALCHEMY_ENGINE_OPTIONS={
-            'pool_recycle': 300,
-            'pool_pre_ping': True,
-        }
+        JSONIFY_PRETTYPRINT_REGULAR=True,
+        JSON_SORT_KEYS=False,
+        MAX_CONTENT_LENGTH=int(os.getenv('MAX_FILE_SIZE', 10 * 1024 * 1024 * 1024))
     )
     
     # Habilitar CORS
-    CORS(app, resources={
-        r"/api/*": {
-            "origins": os.getenv('CORS_ORIGINS', '*').split(',')
-        }
-    })
-    
-    # Inicializar JWT
-    jwt = JWTManager(app)
-    
-    # Inicializar SocketIO
-    socketio = SocketIO(app, 
-                       cors_allowed_origins=os.getenv('CORS_ORIGINS', '*'),
-                       async_mode='eventlet',
-                       logger=os.getenv('ENABLE_DEBUG_LOG', 'false').lower() == 'true',
-                       engineio_logger=os.getenv('ENABLE_DEBUG_LOG', 'false').lower() == 'true')
-    
-    # Registrar blueprints
-    register_blueprints(app)
-    
-    # Registrar handlers de erro
-    register_error_handlers(app)
-    
-    # Registrar comandos CLI
-    register_commands(app)
-    
-    # Registrar context processors
-    register_context_processors(app)
-    
-    # Registrar filtros
-    register_filters(app)
+    CORS(app)
     
     # Rotas básicas
     @app.route('/')
     def index():
         return render_template('index.html')
     
-    @app.route('/dashboard')
-    def dashboard():
-        return render_template('dashboard.html')
-    
     @app.route('/api/status')
     def api_status():
-        from utils.system_info import get_system_info
         return jsonify({
             'status': 'online',
-            'timestamp': datetime.utcnow().isoformat(),
+            'service': 'VOD Sync XUI',
             'version': '4.0.0',
-            'system': get_system_info()
+            'timestamp': os.path.getmtime(__file__)
         })
     
     @app.route('/api/config')
     def api_config():
-        # Retornar configurações não sensíveis
         return jsonify({
             'sync_interval': os.getenv('SYNC_INTERVAL'),
             'max_concurrent_syncs': os.getenv('MAX_CONCURRENT_SYNCS'),
             'auto_scan': os.getenv('ENABLE_AUTO_SCAN'),
-            'real_time_sync': os.getenv('ENABLE_REAL_TIME_SYNC'),
-            'vod_count': 0,  # Será preenchido pelo banco
-            'last_sync': None  # Será preenchido pelo banco
+            'vod_storage': os.getenv('VOD_STORAGE_PATH'),
+            'allowed_extensions': os.getenv('ALLOWED_EXTENSIONS')
         })
     
-    return app, socketio
-
-def register_blueprints(app):
-    """Registrar blueprints da aplicação"""
-    from routes import (
-        auth_routes, vod_routes, sync_routes, 
-        system_routes, api_routes, webhook_routes
-    )
+    @app.route('/health')
+    def health():
+        return jsonify({'status': 'healthy'})
     
-    app.register_blueprint(auth_routes.bp, url_prefix='/auth')
-    app.register_blueprint(vod_routes.bp, url_prefix='/vod')
-    app.register_blueprint(sync_routes.bp, url_prefix='/sync')
-    app.register_blueprint(system_routes.bp, url_prefix='/system')
-    app.register_blueprint(api_routes.bp, url_prefix='/api/v1')
-    app.register_blueprint(webhook_routes.bp, url_prefix='/webhook')
-
-def register_error_handlers(app):
-    """Registrar handlers de erro"""
+    @app.route('/api/v1/sync/start', methods=['POST'])
+    def start_sync():
+        from src.tasks.sync_tasks import periodic_sync_task
+        result = periodic_sync_task.delay()
+        return jsonify({
+            'status': 'started',
+            'task_id': result.id,
+            'message': 'Sincronização iniciada'
+        })
+    
+    @app.route('/api/v1/sync/status/<task_id>')
+    def sync_status(task_id):
+        from src.tasks.celery_app import celery_app
+        result = celery_app.AsyncResult(task_id)
+        return jsonify({
+            'task_id': task_id,
+            'status': result.status,
+            'result': result.result if result.ready() else None
+        })
+    
+    @app.route('/api/v1/vods')
+    def list_vods():
+        import glob
+        vods_dir = os.getenv('VOD_STORAGE_PATH', '/opt/vod-sync-xui/vods')
+        vods = []
+        
+        for ext in ['mp4', 'mkv', 'avi', 'mov']:
+            for vod_file in glob.glob(f"{vods_dir}/**/*.{ext}", recursive=True):
+                vods.append({
+                    'path': vod_file,
+                    'name': os.path.basename(vod_file),
+                    'size': os.path.getsize(vod_file),
+                    'modified': os.path.getmtime(vod_file)
+                })
+        
+        return jsonify({
+            'count': len(vods),
+            'vods': vods[:100]  # Limitar a 100 resultados
+        })
+    
     @app.errorhandler(404)
     def not_found(error):
-        if request.path.startswith('/api/'):
-            return jsonify({'error': 'Not found'}), 404
-        return render_template('errors/404.html'), 404
+        return jsonify({'error': 'Not found'}), 404
     
     @app.errorhandler(500)
     def internal_error(error):
         logger.error(f'Internal server error: {error}')
-        if request.path.startswith('/api/'):
-            return jsonify({'error': 'Internal server error'}), 500
-        return render_template('errors/500.html'), 500
-
-def register_commands(app):
-    """Registrar comandos CLI"""
-    from commands import sync_commands, db_commands, user_commands
+        return jsonify({'error': 'Internal server error'}), 500
     
-    app.cli.add_command(sync_commands.sync_cli)
-    app.cli.add_command(db_commands.db_cli)
-    app.cli.add_command(user_commands.user_cli)
-
-def register_context_processors(app):
-    """Registrar context processors"""
-    @app.context_processor
-    def inject_now():
-        return {'now': datetime.utcnow()}
-    
-    @app.context_processor
-    def inject_config():
-        return {
-            'app_name': 'VOD Sync XUI',
-            'app_version': '4.0.0',
-            'current_year': datetime.now().year
-        }
-
-def register_filters(app):
-    """Registrar filtros de template"""
-    @app.template_filter('format_size')
-    def format_size(value):
-        """Formatar tamanho de arquivo"""
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if value < 1024.0:
-                return f"{value:.2f} {unit}"
-            value /= 1024.0
-        return f"{value:.2f} PB"
-    
-    @app.template_filter('format_duration')
-    def format_duration(seconds):
-        """Formatar duração em segundos"""
-        hours = seconds // 3600
-        minutes = (seconds % 3600) // 60
-        secs = seconds % 60
-        if hours > 0:
-            return f"{hours}:{minutes:02d}:{secs:02d}"
-        return f"{minutes}:{secs:02d}"
+    logger.info("Aplicação Flask criada com sucesso")
+    return app
 
 # Criar a aplicação
-app, socketio = create_app()
+app = create_app()
 
 if __name__ == '__main__':
     host = os.getenv('HOST', '0.0.0.0')
@@ -613,493 +1284,330 @@ if __name__ == '__main__':
     debug = os.getenv('DEBUG', 'false').lower() == 'true'
     
     logger.info(f"Iniciando VOD Sync XUI na porta {port}")
-    socketio.run(app, host=host, port=port, debug=debug)
+    app.run(host=host, port=port, debug=debug)
 EOF
 
-# Criar módulo de sincronização principal
-cat > "$INSTALL_DIR/src/services/sync_service.py" << 'EOF'
-"""
-Serviço de Sincronização de VODs
-"""
-import os
-import json
-import logging
-import shutil
-import hashlib
-import asyncio
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-import aiohttp
-import aiofiles
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
-
-logger = logging.getLogger(__name__)
-
-class VodSyncService:
-    """Serviço principal de sincronização de VODs"""
-    
-    def __init__(self, config_path: str):
-        self.config_path = config_path
-        self.config = self.load_config()
-        self.observer = None
-        self.is_running = False
-        self.sync_queue = asyncio.Queue()
-        self.executor = ThreadPoolExecutor(max_workers=int(os.getenv('MAX_CONCURRENT_SYNCS', 3)))
+# Criar arquivos de templates básicos
+mkdir -p "$INSTALL_DIR/src/templates"
+cat > "$INSTALL_DIR/src/templates/index.html" << 'EOF'
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VOD Sync XUI - Sistema de Sincronização</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
         
-    def load_config(self) -> Dict[str, Any]:
-        """Carregar configuração do arquivo JSON"""
-        try:
-            with open(self.config_path, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Erro ao carregar configuração: {e}")
-            return {}
-    
-    async def start(self):
-        """Iniciar serviço de sincronização"""
-        if self.is_running:
-            logger.warning("Serviço já está em execução")
-            return
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
         
-        self.is_running = True
-        logger.info("Iniciando serviço de sincronização VOD")
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+            max-width: 800px;
+            width: 100%;
+        }
         
-        # Iniciar monitoramento em tempo real
-        if self.config.get('sync_config', {}).get('scheduling', {}).get('real_time_sync', True):
-            self.start_file_monitoring()
+        .header {
+            background: linear-gradient(135deg, #4a6ee0 0%, #6a11cb 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }
         
-        # Iniciar workers de processamento
-        asyncio.create_task(self.process_queue())
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
         
-        # Executar primeira sincronização
-        await self.run_sync()
+        .header .version {
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
         
-        # Agendar sincronizações periódicas
-        interval = self.config.get('sync_config', {}).get('scheduling', {}).get('interval', 300)
-        asyncio.create_task(self.schedule_sync(interval))
+        .content {
+            padding: 40px;
+        }
         
-    async def stop(self):
-        """Parar serviço de sincronização"""
-        self.is_running = False
+        .status-card {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-left: 5px solid #4a6ee0;
+        }
         
-        if self.observer:
-            self.observer.stop()
-            self.observer.join()
+        .status-card h3 {
+            color: #333;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
         
-        self.executor.shutdown(wait=True)
-        logger.info("Serviço de sincronização parado")
-    
-    async def schedule_sync(self, interval: int):
-        """Agendar sincronizações periódicas"""
-        while self.is_running:
-            await asyncio.sleep(interval)
-            if self.is_running:
-                await self.run_sync()
-    
-    async def run_sync(self):
-        """Executar uma sincronização completa"""
-        logger.info("Iniciando sincronização de VODs")
+        .status-icon {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: #4CAF50;
+            display: inline-block;
+        }
         
-        try:
-            sources = self.config.get('sync_config', {}).get('sources', [])
+        .status-list {
+            list-style: none;
+        }
+        
+        .status-list li {
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+        }
+        
+        .status-list li:last-child {
+            border-bottom: none;
+        }
+        
+        .status-value {
+            font-weight: bold;
+            color: #4a6ee0;
+        }
+        
+        .actions {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 30px;
+        }
+        
+        .btn {
+            padding: 15px 25px;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #4a6ee0 0%, #6a11cb 100%);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(106, 17, 203, 0.3);
+        }
+        
+        .btn-secondary {
+            background: #f8f9fa;
+            color: #333;
+            border: 2px solid #ddd;
+        }
+        
+        .btn-secondary:hover {
+            background: #e9ecef;
+            border-color: #4a6ee0;
+        }
+        
+        .btn-icon {
+            font-size: 1.2em;
+        }
+        
+        .footer {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+            font-size: 0.9em;
+            border-top: 1px solid #eee;
+        }
+        
+        @media (max-width: 600px) {
+            .header {
+                padding: 30px 20px;
+            }
             
-            # Processar cada fonte em paralelo
-            tasks = []
-            for source in sources:
-                if source.get('enabled', True):
-                    task = self.process_source(source)
-                    tasks.append(task)
+            .header h1 {
+                font-size: 2em;
+            }
             
-            # Aguardar conclusão de todas as tarefas
-            if tasks:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                
-                # Processar resultados
-                successful = 0
-                failed = 0
-                
-                for result in results:
-                    if isinstance(result, Exception):
-                        logger.error(f"Erro na sincronização: {result}")
-                        failed += 1
-                    elif result:
-                        successful += 1
-                
-                logger.info(f"Sincronização concluída: {successful} sucesso, {failed} falhas")
-                
-                # Notificar conclusão
-                await self.notify_sync_completion(successful, failed)
-                
-        except Exception as e:
-            logger.error(f"Erro durante sincronização: {e}")
-            await self.notify_sync_error(str(e))
+            .content {
+                padding: 20px;
+            }
+            
+            .actions {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎬 VOD Sync XUI</h1>
+            <div class="version">Versão 4.0.0</div>
+            <p>Sistema Completo de Sincronização de VODs</p>
+        </div>
+        
+        <div class="content">
+            <div class="status-card">
+                <h3><span class="status-icon"></span> Status do Sistema</h3>
+                <ul class="status-list" id="statusList">
+                    <li>Carregando status...</li>
+                </ul>
+            </div>
+            
+            <div class="actions">
+                <button class="btn btn-primary" onclick="startSync()">
+                    <span class="btn-icon">🔄</span>
+                    Iniciar Sincronização
+                </button>
+                <button class="btn btn-secondary" onclick="listVods()">
+                    <span class="btn-icon">📁</span>
+                    Listar VODs
+                </button>
+                <button class="btn btn-secondary" onclick="openAPI()">
+                    <span class="btn-icon">🔧</span>
+                    API Docs
+                </button>
+                <button class="btn btn-secondary" onclick="refreshStatus()">
+                    <span class="btn-icon">🔄</span>
+                    Atualizar Status
+                </button>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>Sistema VOD Sync XUI &copy; 2024 - Todos os direitos reservados</p>
+            <p id="serverTime">Carregando tempo do servidor...</p>
+        </div>
+    </div>
     
-    async def process_source(self, source: Dict[str, Any]) -> bool:
-        """Processar uma fonte de VODs"""
-        source_type = source.get('type', 'local')
-        
-        try:
-            if source_type == 'local':
-                return await self.sync_local_source(source)
-            elif source_type == 'ftp':
-                return await self.sync_ftp_source(source)
-            elif source_type == 's3':
-                return await self.sync_s3_source(source)
-            else:
-                logger.warning(f"Tipo de fonte não suportado: {source_type}")
-                return False
+    <script>
+        async function loadStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
                 
-        except Exception as e:
-            logger.error(f"Erro ao processar fonte {source.get('name')}: {e}")
-            return False
-    
-    async def sync_local_source(self, source: Dict[str, Any]) -> bool:
-        """Sincronizar fonte local"""
-        source_path = source.get('path', '')
-        if not source_path or not os.path.exists(source_path):
-            logger.warning(f"Caminho de fonte local não existe: {source_path}")
-            return False
-        
-        # Configurações
-        recursive = source.get('recursive', True)
-        patterns = source.get('patterns', ['*.mp4', '*.mkv', '*.avi'])
-        exclude_patterns = source.get('exclude_patterns', [])
-        
-        logger.info(f"Sincronizando fonte local: {source_path}")
-        
-        # Encontrar arquivos
-        vod_files = self.find_vod_files(source_path, patterns, exclude_patterns, recursive)
-        
-        if not vod_files:
-            logger.info("Nenhum arquivo VOD encontrado")
-            return True
-        
-        logger.info(f"Encontrados {len(vod_files)} arquivos VOD")
-        
-        # Processar cada arquivo
-        success_count = 0
-        for vod_file in vod_files:
-            try:
-                await self.process_vod_file(vod_file, source)
-                success_count += 1
-            except Exception as e:
-                logger.error(f"Erro ao processar {vod_file}: {e}")
-        
-        logger.info(f"Processados {success_count}/{len(vod_files)} arquivos")
-        return success_count > 0
-    
-    def find_vod_files(self, base_path: str, patterns: List[str], 
-                       exclude_patterns: List[str], recursive: bool = True) -> List[str]:
-        """Encontrar arquivos VOD baseado em padrões"""
-        from fnmatch import fnmatch
-        from pathlib import Path
-        
-        vod_files = []
-        base_path_obj = Path(base_path)
-        
-        # Função para verificar se arquivo deve ser excluído
-        def should_exclude(filename: str) -> bool:
-            for pattern in exclude_patterns:
-                if fnmatch(filename, pattern):
-                    return True
-            return False
-        
-        # Método de busca
-        search_method = base_path_obj.rglob if recursive else base_path_obj.glob
-        
-        for pattern in patterns:
-            for file_path in search_method(pattern):
-                if file_path.is_file() and not should_exclude(file_path.name):
-                    vod_files.append(str(file_path))
-        
-        return vod_files
-    
-    async def process_vod_file(self, file_path: str, source: Dict[str, Any]):
-        """Processar um arquivo VOD individual"""
-        from utils.vod_processor import VodProcessor
-        
-        logger.debug(f"Processando arquivo: {file_path}")
-        
-        # Verificar se arquivo já foi processado
-        file_hash = self.calculate_file_hash(file_path)
-        if await self.is_already_processed(file_hash):
-            logger.debug(f"Arquivo já processado: {file_path}")
-            return
-        
-        # Criar processor
-        processor = VodProcessor(file_path, source, self.config)
-        
-        # Validar arquivo
-        if not await processor.validate():
-            logger.warning(f"Arquivo inválido: {file_path}")
-            return
-        
-        # Extrair metadados
-        metadata = await processor.extract_metadata()
-        
-        # Adicionar à fila para processamento assíncrono
-        await self.sync_queue.put({
-            'file_path': file_path,
-            'metadata': metadata,
-            'source': source,
-            'file_hash': file_hash
-        })
-        
-        logger.debug(f"Arquivo adicionado à fila: {file_path}")
-    
-    async def process_queue(self):
-        """Processar itens da fila de sincronização"""
-        while self.is_running:
-            try:
-                # Pegar item da fila com timeout
-                item = await asyncio.wait_for(self.sync_queue.get(), timeout=1.0)
+                const configResponse = await fetch('/api/config');
+                const config = await configResponse.json();
                 
-                if item:
-                    # Processar em thread separada
-                    await asyncio.get_event_loop().run_in_executor(
-                        self.executor,
-                        self.process_queue_item,
-                        item
-                    )
+                const healthResponse = await fetch('/health');
+                const health = await healthResponse.json();
+                
+                const statusList = document.getElementById('statusList');
+                statusList.innerHTML = `
+                    <li>Status do Serviço: <span class="status-value">${data.status}</span></li>
+                    <li>Versão: <span class="status-value">${data.version}</span></li>
+                    <li>Intervalo de Sincronização: <span class="status-value">${config.sync_interval}s</span></li>
+                    <li>Sincronização Automática: <span class="status-value">${config.auto_scan ? 'Ativada' : 'Desativada'}</span></li>
+                    <li>Extensões Permitidas: <span class="status-value">${config.allowed_extensions}</span></li>
+                    <li>Saúde do Sistema: <span class="status-value">${health.status}</span></li>
+                `;
+                
+                document.getElementById('serverTime').textContent = 
+                    `Servidor: ${new Date(data.timestamp * 1000).toLocaleString()}`;
                     
-                    # Marcar como concluído
-                    self.sync_queue.task_done()
+            } catch (error) {
+                document.getElementById('statusList').innerHTML = 
+                    '<li style="color: #dc3545;">Erro ao carregar status do sistema</li>';
+            }
+        }
+        
+        async function startSync() {
+            try {
+                const response = await fetch('/api/v1/sync/start', {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                
+                alert(`Sincronização iniciada! Task ID: ${result.task_id}`);
+                
+                // Monitorar progresso
+                monitorTask(result.task_id);
+                
+            } catch (error) {
+                alert('Erro ao iniciar sincronização: ' + error.message);
+            }
+        }
+        
+        async function monitorTask(taskId) {
+            const checkInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/api/v1/sync/status/${taskId}`);
+                    const result = await response.json();
                     
-            except asyncio.TimeoutError:
-                continue
-            except Exception as e:
-                logger.error(f"Erro ao processar fila: {e}")
-    
-    def process_queue_item(self, item: Dict[str, Any]):
-        """Processar item da fila (executado em thread separada)"""
-        try:
-            file_path = item['file_path']
-            metadata = item['metadata']
-            source = item['source']
-            file_hash = item['file_hash']
-            
-            # Copiar arquivo para destino
-            destination = self.get_destination_path(file_path, metadata, source)
-            os.makedirs(os.path.dirname(destination), exist_ok=True)
-            
-            # Copiar arquivo
-            shutil.copy2(file_path, destination)
-            
-            # Criar thumbnails se configurado
-            if self.config.get('sync_config', {}).get('processing', {}).get('metadata', {}).get('include_thumbnails', True):
-                self.create_thumbnails(destination, metadata)
-            
-            # Salvar metadados no banco de dados
-            self.save_to_database(file_hash, destination, metadata, source)
-            
-            logger.info(f"Arquivo sincronizado: {file_path} -> {destination}")
-            
-            # Notificar sucesso
-            self.notify_file_synced(file_path, destination, metadata)
-            
-        except Exception as e:
-            logger.error(f"Erro ao processar item da fila: {e}")
-            self.notify_file_error(file_path, str(e))
-    
-    def get_destination_path(self, file_path: str, metadata: Dict[str, Any], 
-                            source: Dict[str, Any]) -> str:
-        """Gerar caminho de destino baseado em configuração"""
-        import os
-        from datetime import datetime
+                    if (result.status === 'SUCCESS' || result.status === 'FAILURE') {
+                        clearInterval(checkInterval);
+                        alert(`Sincronização ${result.status.toLowerCase()}!`);
+                        refreshStatus();
+                    }
+                } catch (error) {
+                    clearInterval(checkInterval);
+                }
+            }, 2000);
+        }
         
-        dest_config = self.config.get('sync_config', {}).get('destination', {})
-        dest_base = dest_config.get('path', os.getenv('VOD_STORAGE_PATH', '/var/vods'))
-        organization = dest_config.get('organization', 'flat')
+        async function listVods() {
+            try {
+                const response = await fetch('/api/v1/vods');
+                const result = await response.json();
+                
+                alert(`Encontrados ${result.count} VODs no sistema`);
+                
+                if (result.vods && result.vods.length > 0) {
+                    const vodList = result.vods.slice(0, 5).map(vod => 
+                        `📁 ${vod.name} (${Math.round(vod.size / (1024*1024))}MB)`
+                    ).join('\n');
+                    
+                    if (result.count > 5) {
+                        alert(`${vodList}\n\n... e mais ${result.count - 5} arquivos`);
+                    } else {
+                        alert(vodList);
+                    }
+                }
+                
+            } catch (error) {
+                alert('Erro ao listar VODs: ' + error.message);
+            }
+        }
         
-        # Extrair informações do arquivo
-        filename = os.path.basename(file_path)
-        file_ext = os.path.splitext(filename)[1]
+        function openAPI() {
+            window.open('/api/status', '_blank');
+        }
         
-        if organization == 'category':
-            # Organizar por categoria/tipo
-            category = metadata.get('category', 'unknown')
-            return os.path.join(dest_base, category, filename)
+        function refreshStatus() {
+            loadStatus();
+        }
         
-        elif organization == 'date':
-            # Organizar por data
-            date_str = datetime.now().strftime('%Y/%m/%d')
-            return os.path.join(dest_base, date_str, filename)
+        // Carregar status inicial
+        loadStatus();
         
-        elif organization == 'source':
-            # Organizar por fonte
-            source_name = source.get('name', 'unknown')
-            return os.path.join(dest_base, source_name, filename)
-        
-        else:
-            # Estrutura plana
-            return os.path.join(dest_base, filename)
-    
-    def create_thumbnails(self, file_path: str, metadata: Dict[str, Any]):
-        """Criar thumbnails do vídeo"""
-        try:
-            from utils.thumbnail_generator import ThumbnailGenerator
-            
-            generator = ThumbnailGenerator(file_path)
-            thumbnails = generator.generate()
-            
-            # Salvar thumbnails
-            thumbnail_dir = os.path.join(
-                os.getenv('VOD_STORAGE_PATH', '/var/vods'),
-                'thumbnails',
-                os.path.basename(file_path)
-            )
-            os.makedirs(thumbnail_dir, exist_ok=True)
-            
-            for i, thumb in enumerate(thumbnails):
-                thumb_path = os.path.join(thumbnail_dir, f'thumb_{i}.jpg')
-                thumb.save(thumb_path, 'JPEG', quality=85)
-            
-            logger.debug(f"Thumbnails criados para: {file_path}")
-            
-        except Exception as e:
-            logger.warning(f"Erro ao criar thumbnails: {e}")
-    
-    def save_to_database(self, file_hash: str, file_path: str, 
-                        metadata: Dict[str, Any], source: Dict[str, Any]):
-        """Salvar informações no banco de dados"""
-        try:
-            from models.vod_model import VodFile
-            
-            vod_file = VodFile(
-                file_hash=file_hash,
-                original_path=file_path,
-                current_path=file_path,
-                filename=os.path.basename(file_path),
-                file_size=metadata.get('file_size', 0),
-                duration=metadata.get('duration', 0),
-                resolution=metadata.get('resolution', ''),
-                format=metadata.get('format', ''),
-                codec=metadata.get('codec', ''),
-                bitrate=metadata.get('bitrate', 0),
-                source=source.get('name', 'unknown'),
-                metadata=metadata,
-                sync_date=datetime.now(),
-                status='synced'
-            )
-            
-            # TODO: Implementar salvamento no banco
-            # database.session.add(vod_file)
-            # database.session.commit()
-            
-        except Exception as e:
-            logger.error(f"Erro ao salvar no banco: {e}")
-    
-    async def is_already_processed(self, file_hash: str) -> bool:
-        """Verificar se arquivo já foi processado"""
-        # TODO: Implementar verificação no banco de dados
-        return False
-    
-    def calculate_file_hash(self, file_path: str) -> str:
-        """Calcular hash do arquivo"""
-        sha256_hash = hashlib.sha256()
-        
-        try:
-            with open(file_path, "rb") as f:
-                for byte_block in iter(lambda: f.read(4096), b""):
-                    sha256_hash.update(byte_block)
-            
-            return sha256_hash.hexdigest()
-            
-        except Exception as e:
-            logger.error(f"Erro ao calcular hash: {e}")
-            return ""
-    
-    def start_file_monitoring(self):
-        """Iniciar monitoramento de arquivos em tempo real"""
-        try:
-            from services.file_monitor import FileChangeHandler
-            
-            event_handler = FileChangeHandler(self)
-            self.observer = Observer()
-            
-            # Monitorar cada fonte local
-            sources = self.config.get('sync_config', {}).get('sources', [])
-            for source in sources:
-                if source.get('type') == 'local' and source.get('enabled', True):
-                    path = source.get('path', '')
-                    if os.path.exists(path):
-                        self.observer.schedule(event_handler, path, recursive=True)
-            
-            self.observer.start()
-            logger.info("Monitoramento de arquivos iniciado")
-            
-        except Exception as e:
-            logger.error(f"Erro ao iniciar monitoramento: {e}")
-    
-    async def notify_sync_completion(self, successful: int, failed: int):
-        """Notificar conclusão da sincronização"""
-        # TODO: Implementar notificações (email, telegram, webhook)
-        pass
-    
-    async def notify_sync_error(self, error: str):
-        """Notificar erro na sincronização"""
-        # TODO: Implementar notificações de erro
-        pass
-    
-    def notify_file_synced(self, original_path: str, destination_path: str, 
-                          metadata: Dict[str, Any]):
-        """Notificar arquivo sincronizado"""
-        # TODO: Implementar notificações por arquivo
-        pass
-    
-    def notify_file_error(self, file_path: str, error: str):
-        """Notificar erro no processamento de arquivo"""
-        # TODO: Implementar notificações de erro por arquivo
-        pass
-    
-    async def sync_ftp_source(self, source: Dict[str, Any]) -> bool:
-        """Sincronizar fonte FTP"""
-        # TODO: Implementar sincronização FTP
-        logger.warning("Sincronização FTP não implementada")
-        return False
-    
-    async def sync_s3_source(self, source: Dict[str, Any]) -> bool:
-        """Sincronizar fonte S3"""
-        # TODO: Implementar sincronização S3
-        logger.warning("Sincronização S3 não implementada")
-        return False
-
-# Handler para monitoramento de arquivos
-class FileChangeHandler(FileSystemEventHandler):
-    """Handler para monitorar mudanças em arquivos"""
-    
-    def __init__(self, sync_service: VodSyncService):
-        self.sync_service = sync_service
-    
-    def on_created(self, event):
-        """Arquivo criado"""
-        if not event.is_directory:
-            logger.info(f"Arquivo criado: {event.src_path}")
-            # Adicionar à fila de processamento
-            asyncio.create_task(self.sync_service.process_new_file(event.src_path))
-    
-    def on_modified(self, event):
-        """Arquivo modificado"""
-        if not event.is_directory:
-            logger.debug(f"Arquivo modificado: {event.src_path}")
-    
-    def on_deleted(self, event):
-        """Arquivo deletado"""
-        if not event.is_directory:
-            logger.info(f"Arquivo deletado: {event.src_path}")
-    
-    def on_moved(self, event):
-        """Arquivo movido/renomeado"""
-        if not event.is_directory:
-            logger.info(f"Arquivo movido: {event.src_path} -> {event.dest_path}")
+        // Atualizar status a cada 30 segundos
+        setInterval(loadStatus, 30000);
+    </script>
+</body>
+</html>
 EOF
-
-# Criar mais módulos necessários (resumidos por questão de espaço)
-# Criar models, controllers, routes, utils, etc.
 
 print_success "Aplicação Flask criada"
 
@@ -1120,8 +1628,22 @@ mysql -e "FLUSH PRIVILEGES;"
 
 print_success "Banco de dados MySQL configurado"
 
-# 8. Configurar Nginx como proxy reverso
-print_header "8. CONFIGURAÇÃO DO NGINX"
+# 8. Configurar Redis
+print_header "8. CONFIGURAÇÃO DO REDIS"
+print_step "Configurando Redis..."
+
+systemctl start redis-server 2>/dev/null || true
+systemctl enable redis-server 2>/dev/null || true
+
+# Testar Redis
+if redis-cli ping | grep -q "PONG"; then
+    print_success "Redis configurado e funcionando"
+else
+    print_error "Redis falhou ao iniciar"
+fi
+
+# 9. Configurar Nginx como proxy reverso
+print_header "9. CONFIGURAÇÃO DO NGINX"
 cat > /etc/nginx/sites-available/vod-sync << EOF
 server {
     listen 80;
@@ -1146,9 +1668,6 @@ server {
     gzip_types text/plain text/css text/xml text/javascript application/x-javascript application/xml application/javascript application/json;
     gzip_disable "MSIE [1-6]\.";
     
-    # Root
-    root $INSTALL_DIR/static;
-    
     # Página inicial
     location / {
         proxy_pass http://127.0.0.1:5000;
@@ -1156,11 +1675,6 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        
-        # WebSocket support
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
     }
     
     # API
@@ -1170,10 +1684,6 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        
-        # Rate limiting
-        limit_req zone=api burst=20 nodelay;
-        limit_req_status 429;
     }
     
     # Arquivos estáticos
@@ -1181,8 +1691,6 @@ server {
         alias $INSTALL_DIR/static/;
         expires 1y;
         add_header Cache-Control "public, immutable";
-        
-        # Habilita CORS para fontes
         add_header Access-Control-Allow-Origin *;
     }
     
@@ -1192,17 +1700,12 @@ server {
         expires 30d;
         add_header Cache-Control "public";
         
-        # Enable streaming
-        mp4;
-        mp4_buffer_size 1m;
-        mp4_max_buffer_size 5m;
-        
-        # CORS
+        # Enable CORS for streaming
         add_header Access-Control-Allow-Origin *;
-        add_header Access-Control-Allow-Methods "GET, HEAD";
+        add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS";
         add_header Access-Control-Allow-Headers "Range";
         
-        # Range requests for streaming
+        # Handle range requests for video streaming
         if (\$request_method = 'OPTIONS') {
             add_header Access-Control-Allow-Origin *;
             add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS";
@@ -1214,26 +1717,11 @@ server {
         }
     }
     
-    # Thumbnails
-    location /thumbnails/ {
-        alias $INSTALL_DIR/data/thumbnails/;
-        expires 7d;
-        add_header Cache-Control "public";
-    }
-    
     # Health check
     location /health {
         access_log off;
         return 200 "healthy\n";
         add_header Content-Type text/plain;
-    }
-    
-    # Status page
-    location /status {
-        stub_status on;
-        access_log off;
-        allow 127.0.0.1;
-        deny all;
     }
     
     # Deny access to hidden files
@@ -1243,9 +1731,6 @@ server {
         log_not_found off;
     }
 }
-
-# Rate limiting zone
-limit_req_zone \$binary_remote_addr zone=api:10m rate=10r/s;
 EOF
 
 # Habilitar site
@@ -1256,16 +1741,233 @@ rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
 nginx -t && systemctl restart nginx
 print_success "Nginx configurado"
 
-# 9. Criar serviços systemd
-print_header "9. CONFIGURAÇÃO DE SERVIÇOS SYSTEMD"
+# 10. Criar scripts auxiliares
+print_header "10. CRIANDO SCRIPTS AUXILIARES"
 
-# Serviço principal
+# Script scheduler.py
+cat > "$INSTALL_DIR/scripts/scheduler.py" << 'EOF'
+#!/usr/bin/env python3
+"""
+Agendador de tarefas para o VOD Sync XUI
+"""
+import os
+import sys
+import time
+import logging
+from datetime import datetime
+from pathlib import Path
+
+# Adicionar diretório src ao path
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+
+from tasks.celery_app import celery_app
+from tasks.sync_tasks import periodic_sync_task
+
+# Configurar logging
+logging.basicConfig(
+    level=os.getenv('LOG_LEVEL', 'INFO'),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(os.getenv('LOG_PATH', '/opt/vod-sync-xui/logs'), 'scheduler.log')),
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+def main():
+    """Função principal do agendador"""
+    logger.info("Iniciando agendador do VOD Sync XUI")
+    
+    try:
+        # Verificar conexão com Redis
+        celery_app.connection().ensure_connection()
+        logger.info("Conexão com Redis estabelecida")
+        
+        # Executar tarefa inicial
+        logger.info("Executando sincronização inicial...")
+        result = periodic_sync_task.delay()
+        
+        # Aguardar um pouco para verificar se a tarefa foi aceita
+        time.sleep(5)
+        
+        if result.ready():
+            logger.info(f"Tarefa inicial concluída: {result.result}")
+        else:
+            logger.info(f"Tarefa inicial em execução: {result.id}")
+        
+        # Manter o script em execução
+        logger.info("Agendador rodando. Pressione Ctrl+C para sair.")
+        
+        while True:
+            time.sleep(60)
+            # Verificar saúde periódica
+            health_check = celery_app.control.inspect().ping()
+            if not health_check:
+                logger.warning("Não foi possível verificar a saúde do worker")
+            
+    except KeyboardInterrupt:
+        logger.info("Agendador interrompido pelo usuário")
+    except Exception as e:
+        logger.error(f"Erro no agendador: {e}")
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
+EOF
+
+# Script cleanup.sh
+cat > "$INSTALL_DIR/scripts/cleanup.sh" << 'EOF'
+#!/bin/bash
+# Script de limpeza para o VOD Sync XUI
+
+INSTALL_DIR="/opt/vod-sync-xui"
+LOG_DIR="$INSTALL_DIR/logs"
+TEMP_DIR="$INSTALL_DIR/temp"
+DAYS_TO_KEEP=30
+
+echo "=== LIMPEZA DO VOD SYNC XUI ==="
+echo "Data: $(date)"
+echo ""
+
+# Limpar logs antigos
+echo "1. Limpando logs antigos (mais de $DAYS_TO_KEEP dias)..."
+find "$LOG_DIR" -name "*.log" -type f -mtime +$DAYS_TO_KEEP -delete
+echo "   Logs antigos removidos"
+
+# Limpar arquivos temporários
+echo "2. Limpando arquivos temporários..."
+if [ -d "$TEMP_DIR" ]; then
+    find "$TEMP_DIR" -type f -mtime +1 -delete
+    echo "   Arquivos temporários removidos"
+else
+    echo "   Diretório temporário não encontrado"
+fi
+
+# Limpar cache do Redis se configurado
+echo "3. Limpando cache do Redis..."
+if command -v redis-cli &> /dev/null; then
+    redis-cli FLUSHDB ASYNC
+    echo "   Cache do Redis limpo"
+else
+    echo "   Redis não encontrado"
+fi
+
+# Verificar espaço em disco
+echo "4. Verificando espaço em disco..."
+df -h "$INSTALL_DIR"
+
+# Verificar tamanho dos diretórios
+echo ""
+echo "5. Tamanho dos diretórios principais:"
+du -sh "$INSTALL_DIR"/{vods,logs,data,temp} 2>/dev/null || true
+
+echo ""
+echo "=== LIMPEZA CONCLUÍDA ==="
+EOF
+
+# Script de inicialização simplificado
+cat > "$INSTALL_DIR/scripts/init_db.py" << 'EOF'
+#!/usr/bin/env python3
+"""
+Script para inicializar o banco de dados
+"""
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+
+def main():
+    print("Inicializando banco de dados do VOD Sync XUI...")
+    
+    # Criar diretórios necessários
+    directories = [
+        'data/database',
+        'data/thumbnails',
+        'data/metadata',
+        'vods/movies',
+        'vods/series',
+        'vods/originals',
+        'vods/processed',
+        'vods/queue'
+    ]
+    
+    base_dir = Path('/opt/vod-sync-xui')
+    for directory in directories:
+        dir_path = base_dir / directory
+        dir_path.mkdir(parents=True, exist_ok=True)
+        print(f"  Criado: {dir_path}")
+    
+    # Criar arquivo SQLite de cache
+    import sqlite3
+    cache_db = base_dir / 'data/database/vod_cache.db'
+    
+    if not cache_db.exists():
+        conn = sqlite3.connect(str(cache_db))
+        cursor = conn.cursor()
+        
+        # Criar tabela de cache de arquivos processados
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS processed_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_hash TEXT UNIQUE NOT NULL,
+                file_path TEXT NOT NULL,
+                file_size INTEGER,
+                processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source TEXT,
+                destination TEXT,
+                status TEXT
+            )
+        ''')
+        
+        # Criar tabela de metadados
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS vod_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_hash TEXT UNIQUE NOT NULL,
+                filename TEXT,
+                duration REAL,
+                width INTEGER,
+                height INTEGER,
+                codec TEXT,
+                bitrate INTEGER,
+                format TEXT,
+                metadata_json TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Criar índices
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_hash ON processed_files(file_hash)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_processed_at ON processed_files(processed_at)')
+        
+        conn.commit()
+        conn.close()
+        print(f"  Banco de dados SQLite criado: {cache_db}")
+    
+    print("Banco de dados inicializado com sucesso!")
+
+if __name__ == '__main__':
+    main()
+EOF
+
+# Dar permissões
+chmod +x "$INSTALL_DIR/scripts"/*.py
+chmod +x "$INSTALL_DIR/scripts/cleanup.sh"
+
+print_success "Scripts auxiliares criados"
+
+# 11. Criar serviços systemd corrigidos
+print_header "11. CONFIGURAÇÃO DE SERVIÇOS SYSTEMD"
+
+# Serviço principal Flask
 cat > /etc/systemd/system/vod-sync.service << EOF
 [Unit]
 Description=VOD Sync XUI - Serviço Principal
-After=network.target mysql.service nginx.service
+After=network.target mysql.service redis-server.service nginx.service
+Requires=mysql.service redis-server.service
 Wants=network-online.target
-Requires=mysql.service
 
 [Service]
 Type=simple
@@ -1275,9 +1977,9 @@ WorkingDirectory=$INSTALL_DIR
 Environment=PATH=$INSTALL_DIR/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=$INSTALL_DIR/.env
 ExecStart=$INSTALL_DIR/venv/bin/gunicorn \
-  --bind unix:$INSTALL_DIR/vod-sync.sock \
-  --workers 4 \
-  --worker-class eventlet \
+  --bind 127.0.0.1:5000 \
+  --workers 2 \
+  --threads 4 \
   --timeout 300 \
   --access-logfile $INSTALL_DIR/logs/app/access.log \
   --error-logfile $INSTALL_DIR/logs/app/error.log \
@@ -1292,18 +1994,18 @@ StandardError=journal
 SyslogIdentifier=vod-sync
 LimitNOFILE=65536
 LimitNPROC=65536
-OOMScoreAdjust=-100
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Serviço worker
+# Serviço Celery Worker corrigido
 cat > /etc/systemd/system/vod-sync-worker.service << EOF
 [Unit]
-Description=VOD Sync XUI - Worker de Processamento
-After=vod-sync.service
-Requires=vod-sync.service
+Description=VOD Sync XUI - Worker Celery
+After=network.target redis-server.service vod-sync.service
+Requires=redis-server.service
+BindsTo=vod-sync.service
 
 [Service]
 Type=simple
@@ -1315,9 +2017,8 @@ EnvironmentFile=$INSTALL_DIR/.env
 ExecStart=$INSTALL_DIR/venv/bin/celery \
   -A src.tasks.celery_app worker \
   --loglevel=info \
-  --concurrency=4 \
-  --hostname=worker@%h \
-  --queues=sync,process,notify
+  --concurrency=2 \
+  --hostname=worker@%h
 ExecReload=/bin/kill -s HUP \$MAINPID
 ExecStop=/bin/kill -s TERM \$MAINPID
 Restart=on-failure
@@ -1332,12 +2033,13 @@ LimitNPROC=65536
 WantedBy=multi-user.target
 EOF
 
-# Serviço de sincronização agendada
-cat > /etc/systemd/system/vod-sync-scheduler.service << EOF
+# Serviço Celery Beat para tarefas agendadas
+cat > /etc/systemd/system/vod-sync-beat.service << EOF
 [Unit]
-Description=VOD Sync XUI - Agendador de Tarefas
-After=vod-sync.service
-Requires=vod-sync.service
+Description=VOD Sync XUI - Celery Beat Scheduler
+After=network.target redis-server.service vod-sync-worker.service
+Requires=redis-server.service vod-sync-worker.service
+BindsTo=vod-sync-worker.service
 
 [Service]
 Type=simple
@@ -1346,43 +2048,35 @@ Group=root
 WorkingDirectory=$INSTALL_DIR
 Environment=PATH=$INSTALL_DIR/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=$INSTALL_DIR/.env
-ExecStart=$INSTALL_DIR/venv/bin/python $INSTALL_DIR/scripts/scheduler.py
+ExecStart=$INSTALL_DIR/venv/bin/celery \
+  -A src.tasks.celery_app beat \
+  --loglevel=info \
+  --scheduler celery.beat.PersistentScheduler \
+  --schedule $INSTALL_DIR/celerybeat-schedule
 ExecReload=/bin/kill -s HUP \$MAINPID
 ExecStop=/bin/kill -s TERM \$MAINPID
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=vod-sync-scheduler
+SyslogIdentifier=vod-sync-beat
+LimitNOFILE=65536
+LimitNPROC=65536
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Timer para sincronização periódica
-cat > /etc/systemd/system/vod-sync-scheduler.timer << EOF
-[Unit]
-Description=Executa sincronização periódica de VODs
-Requires=vod-sync-scheduler.service
-
-[Timer]
-Unit=vod-sync-scheduler.service
-OnBootSec=5min
-OnUnitActiveSec=5min
-AccuracySec=1min
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
+# Remover serviço scheduler antigo
+rm -f /etc/systemd/system/vod-sync-scheduler.service /etc/systemd/system/vod-sync-scheduler.timer 2>/dev/null || true
 
 # Recarregar daemon
 systemctl daemon-reload
 
 print_success "Serviços systemd criados"
 
-# 10. Criar scripts de gerenciamento
-print_header "10. SCRIPTS DE GERENCIAMENTO"
+# 12. Criar scripts de gerenciamento
+print_header "12. SCRIPTS DE GERENCIAMENTO"
 
 # Script de inicialização
 cat > "$INSTALL_DIR/start.sh" << 'EOF'
@@ -1394,12 +2088,29 @@ INSTALL_DIR="/opt/vod-sync-xui"
 
 echo "🚀 Iniciando VOD Sync XUI..."
 
-# Iniciar serviços
-systemctl start mysql nginx
+# Iniciar serviços na ordem correta
+echo "1. Iniciando MySQL..."
+systemctl start mysql
+
+echo "2. Iniciando Redis..."
+systemctl start redis-server
+
+echo "3. Iniciando Nginx..."
+systemctl start nginx
+
+echo "4. Inicializando banco de dados..."
+cd "$INSTALL_DIR"
+source venv/bin/activate
+python scripts/init_db.py
+
+echo "5. Iniciando aplicação Flask..."
 systemctl start vod-sync
+
+echo "6. Iniciando Celery Worker..."
 systemctl start vod-sync-worker
-systemctl start vod-sync-scheduler
-systemctl start vod-sync-scheduler.timer
+
+echo "7. Iniciando Celery Beat..."
+systemctl start vod-sync-beat
 
 sleep 3
 
@@ -1408,18 +2119,19 @@ echo ""
 echo "📊 Status dos serviços:"
 echo "======================="
 
-services=("mysql" "nginx" "vod-sync" "vod-sync-worker" "vod-sync-scheduler")
+services=("mysql" "redis-server" "nginx" "vod-sync" "vod-sync-worker" "vod-sync-beat")
 
 for service in "${services[@]}"; do
     if systemctl is-active --quiet "$service"; then
         echo "✅ $service: ATIVO"
     else
         echo "❌ $service: INATIVO"
+        echo "   Logs: journalctl -u $service -n 20 --no-pager"
     fi
 done
 
 # Obter IP
-IP=$(hostname -I | awk '{print $1}' || echo "127.0.0.1")
+IP=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "127.0.0.1")
 
 echo ""
 echo "🌐 URLs de acesso:"
@@ -1440,17 +2152,22 @@ cat > "$INSTALL_DIR/stop.sh" << 'EOF'
 
 echo "🛑 Parando VOD Sync XUI..."
 
-systemctl stop vod-sync-scheduler.timer
-systemctl stop vod-sync-scheduler
+# Parar serviços na ordem inversa
+systemctl stop vod-sync-beat
 systemctl stop vod-sync-worker
 systemctl stop vod-sync
+systemctl stop nginx
+systemctl stop redis-server
+# Não parar MySQL para manter dados
 
 sleep 2
 
 echo "✅ Serviços parados"
 echo ""
 echo "📊 Status:"
-systemctl status vod-sync --no-pager -l
+echo "vod-sync: $(systemctl is-active vod-sync)"
+echo "vod-sync-worker: $(systemctl is-active vod-sync-worker)"
+echo "vod-sync-beat: $(systemctl is-active vod-sync-beat)"
 EOF
 
 # Script de reinicialização
@@ -1477,7 +2194,7 @@ echo ""
 # Serviços
 echo "🔧 SERVIÇOS:"
 echo "------------"
-services=("mysql" "nginx" "vod-sync" "vod-sync-worker" "vod-sync-scheduler" "vod-sync-scheduler.timer")
+services=("mysql" "redis-server" "nginx" "vod-sync" "vod-sync-worker" "vod-sync-beat")
 
 for service in "${services[@]}"; do
     status=$(systemctl is-active "$service" 2>/dev/null || echo "not-found")
@@ -1492,6 +2209,7 @@ for service in "${services[@]}"; do
             ;;
         failed)
             echo "❌ $service: FALHOU"
+            journalctl -u "$service" -n 5 --no-pager
             ;;
         *)
             echo "❓ $service: $status"
@@ -1516,12 +2234,18 @@ else
     echo "❌ API (5000): Não ouvindo"
 fi
 
+if ss -tlnp | grep -q :6379; then
+    echo "✅ Redis (6379): Ouvindo"
+else
+    echo "❌ Redis (6379): Não ouvindo"
+fi
+
 echo ""
 
 # Storage
 echo "💾 ARMAZENAMENTO:"
 echo "-----------------"
-total_vods=$(find "$INSTALL_DIR/vods" -type f -name "*.mp4" -o -name "*.mkv" -o -name "*.avi" 2>/dev/null | wc -l)
+total_vods=$(find "$INSTALL_DIR/vods" -type f \( -name "*.mp4" -o -name "*.mkv" -o -name "*.avi" -o -name "*.mov" \) 2>/dev/null | wc -l)
 total_size=$(du -sh "$INSTALL_DIR/vods" 2>/dev/null | cut -f1)
 
 echo "📁 VODs encontrados: $total_vods arquivos"
@@ -1531,12 +2255,26 @@ echo "📂 Diretório: $INSTALL_DIR/vods"
 echo ""
 
 # Logs
-echo "📝 LOGS (últimas 5 linhas de erro):"
+echo "📝 LOGS (últimas 3 linhas de erro):"
 echo "------------------------------------"
 if [ -f "$INSTALL_DIR/logs/app/error.log" ]; then
-    tail -5 "$INSTALL_DIR/logs/app/error.log"
+    echo "Aplicação:"
+    tail -3 "$INSTALL_DIR/logs/app/error.log" 2>/dev/null || echo "  Nenhum erro"
 else
     echo "Arquivo de log não encontrado"
+fi
+
+echo ""
+
+# Redis
+echo "🔴 REDIS:"
+echo "---------"
+if redis-cli ping 2>/dev/null | grep -q "PONG"; then
+    echo "✅ Redis: CONECTADO"
+    redis_info=$(redis-cli info memory 2>/dev/null | grep -E "used_memory_human|maxmemory_human" || echo "")
+    echo "   $redis_info"
+else
+    echo "❌ Redis: DESCONECTADO"
 fi
 
 echo ""
@@ -1544,6 +2282,8 @@ echo ""
 # URL
 IP=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "127.0.0.1")
 echo "🌐 ACESSO: http://$IP"
+echo "   API Status: http://$IP/api/status"
+echo "   Health: http://$IP/health"
 EOF
 
 # Script de logs
@@ -1557,10 +2297,10 @@ echo "========================"
 echo ""
 echo "Selecione o log para visualizar:"
 echo "1. Aplicação (app)"
-echo "2. Worker"
-echo "3. Nginx"
-echo "4. Todos (tail -f)"
-echo "5. Erros somente"
+echo "2. Nginx"
+echo "3. Worker Celery"
+echo "4. Todos (multitail)"
+echo "5. Ver erros recentes"
 echo ""
 read -p "Escolha (1-5): " choice
 
@@ -1569,19 +2309,29 @@ case $choice in
         tail -f "$INSTALL_DIR/logs/app/error.log"
         ;;
     2)
-        journalctl -u vod-sync-worker -f
-        ;;
-    3)
         tail -f "$INSTALL_DIR/logs/nginx/error.log"
         ;;
+    3)
+        journalctl -u vod-sync-worker -f
+        ;;
     4)
-        multitail \
-            -l "tail -f $INSTALL_DIR/logs/app/error.log" \
-            -l "journalctl -u vod-sync-worker -f" \
-            -l "tail -f $INSTALL_DIR/logs/nginx/access.log"
+        if command -v multitail >/dev/null; then
+            multitail \
+                -l "tail -f $INSTALL_DIR/logs/app/error.log" \
+                -l "tail -f $INSTALL_DIR/logs/nginx/access.log" \
+                -l "journalctl -u vod-sync-worker -f"
+        else
+            echo "Instale multitail: apt-get install multitail"
+            echo "Visualizando apenas logs da aplicação:"
+            tail -f "$INSTALL_DIR/logs/app/error.log"
+        fi
         ;;
     5)
-        grep -i error "$INSTALL_DIR/logs/app/error.log" | tail -50
+        echo "Erros da aplicação:"
+        grep -i error "$INSTALL_DIR/logs/app/error.log" | tail -20
+        echo ""
+        echo "Erros do worker:"
+        journalctl -u vod-sync-worker --since "1 hour ago" | grep -i error | tail -20
         ;;
     *)
         echo "Opção inválida"
@@ -1605,18 +2355,19 @@ echo "Backup: $BACKUP_FILE"
 mkdir -p "$BACKUP_DIR"
 
 # Parar serviços temporariamente
-systemctl stop vod-sync vod-sync-worker
+$INSTALL_DIR/stop.sh
 
-# Criar backup
+# Criar backup (excluindo arquivos grandes e temporários)
 tar -czf "$BACKUP_FILE" \
     --exclude="$INSTALL_DIR/venv" \
     --exclude="$INSTALL_DIR/vods" \
-    --exclude="$INSTALL_DIR/logs" \
     --exclude="$INSTALL_DIR/temp" \
+    --exclude="$INSTALL_DIR/logs" \
+    --exclude="$INSTALL_DIR/backup" \
     -C "$INSTALL_DIR/.." vod-sync-xui
 
 # Reiniciar serviços
-systemctl start vod-sync vod-sync-worker
+$INSTALL_DIR/start.sh
 
 # Verificar backup
 if [ -f "$BACKUP_FILE" ]; then
@@ -1643,7 +2394,6 @@ cat > "$INSTALL_DIR/update.sh" << 'EOF'
 #!/bin/bash
 
 INSTALL_DIR="/opt/vod-sync-xui"
-BACKUP_DIR="$INSTALL_DIR/backup"
 UPDATE_LOG="$INSTALL_DIR/logs/update.log"
 
 echo "🔄 Iniciando atualização do VOD Sync XUI..."
@@ -1660,12 +2410,14 @@ echo "1. Criando backup..."
 
 # Parar serviços
 echo "2. Parando serviços..."
-systemctl stop vod-sync vod-sync-worker vod-sync-scheduler.timer
+"$INSTALL_DIR/stop.sh"
 
-# Atualizar código (simulação - na realidade viria do git)
+# Atualizar código do git (se existir)
 echo "3. Atualizando código..."
 cd "$INSTALL_DIR"
-git pull origin master 2>/dev/null || echo "Git não configurado, continuando..."
+if [ -d ".git" ]; then
+    git pull origin main 2>/dev/null || git pull origin master 2>/dev/null || echo "Git não configurado ou falha"
+fi
 
 # Atualizar dependências
 echo "4. Atualizando dependências..."
@@ -1673,11 +2425,9 @@ source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt --upgrade
 
-# Atualizar banco de dados
-echo "5. Atualizando banco de dados..."
-if [ -f "src/models.py" ]; then
-    flask db upgrade 2>/dev/null || echo "Atualização do banco não necessária"
-fi
+# Inicializar banco de dados
+echo "5. Inicializando banco de dados..."
+python scripts/init_db.py
 
 # Recarregar serviços
 echo "6. Recarregando serviços..."
@@ -1685,11 +2435,11 @@ systemctl daemon-reload
 
 # Iniciar serviços
 echo "7. Iniciando serviços..."
-systemctl start vod-sync vod-sync-worker vod-sync-scheduler.timer
+"$INSTALL_DIR/start.sh"
 
 # Verificar status
 echo "8. Verificando status..."
-sleep 3
+sleep 5
 "$INSTALL_DIR/status.sh"
 
 echo ""
@@ -1703,72 +2453,61 @@ chmod +x "$INSTALL_DIR"/*.sh
 
 print_success "Scripts de gerenciamento criados"
 
-# 11. Configurar cron jobs
-print_header "11. CONFIGURAÇÃO DE TAREFAS AGENDADAS (CRON)"
+# 13. Configurar cron jobs
+print_header "13. CONFIGURAÇÃO DE TAREFAS AGENDADAS (CRON)"
 cat > /etc/cron.d/vod-sync << EOF
 # Tarefas agendadas do VOD Sync XUI
+# Editado em: $(date)
 
 # Limpeza diária de arquivos temporários (2:00 AM)
 0 2 * * * root $INSTALL_DIR/scripts/cleanup.sh >> $INSTALL_DIR/logs/cron/cleanup.log 2>&1
 
-# Backup diário (3:00 AM)
-0 3 * * * root $INSTALL_DIR/backup.sh >> $INSTALL_DIR/logs/cron/backup.log 2>&1
+# Backup semanal (domingo 3:00 AM)
+0 3 * * 0 root $INSTALL_DIR/backup.sh >> $INSTALL_DIR/logs/cron/backup.log 2>&1
 
-# Verificação de saúde (a cada 15 minutos)
-*/15 * * * * root curl -s http://localhost/health > /dev/null || systemctl restart vod-sync >> $INSTALL_DIR/logs/cron/health.log 2>&1
+# Verificação de saúde (a cada 10 minutos)
+*/10 * * * * root curl -s -o /dev/null -w "%{http_code}" http://localhost/health | grep -q "200" || systemctl restart vod-sync >> $INSTALL_DIR/logs/cron/health.log 2>&1
 
-# Limpeza de logs antigos (domingo 4:00 AM)
-0 4 * * 0 root find $INSTALL_DIR/logs -name "*.log" -mtime +30 -delete >> $INSTALL_DIR/logs/cron/logrotate.log 2>&1
+# Limpeza de logs antigos (todo dia 4:00 AM)
+0 4 * * * root find $INSTALL_DIR/logs -name "*.log" -type f -mtime +30 -delete >> $INSTALL_DIR/logs/cron/logrotate.log 2>&1
 
-# Sincronização manual via API (opcional)
-#0 */6 * * * root curl -X POST http://localhost/api/v1/sync/start -H "Authorization: Bearer \$API_KEY" >> $INSTALL_DIR/logs/cron/sync.log 2>&1
+# Sincronização manual (opcional - descomente se quiser)
+#0 */6 * * * root curl -X POST http://localhost/api/v1/sync/start >> $INSTALL_DIR/logs/cron/sync.log 2>&1
 EOF
 
 print_success "Tarefas cron configuradas"
 
-# 12. Configurar firewall (se necessário)
-print_header "12. CONFIGURAÇÃO DE SEGURANÇA"
-# Abrir porta 80 se firewall estiver ativo
-if command -v ufw &> /dev/null && ufw status | grep -q "active"; then
-    ufw allow 80/tcp
-    ufw allow 443/tcp
-    print_success "Regras de firewall configuradas"
-fi
+# 14. Inicializar banco de dados
+print_header "14. INICIALIZAÇÃO DO BANCO DE DADOS"
+cd "$INSTALL_DIR"
+source venv/bin/activate
+python scripts/init_db.py
+print_success "Banco de dados inicializado"
 
-# 13. Iniciar serviços
-print_header "13. INICIALIZAÇÃO DOS SERVIÇOS"
+# 15. Iniciar serviços
+print_header "15. INICIALIZAÇÃO DOS SERVIÇOS"
 systemctl daemon-reload
 
 # Iniciar serviços na ordem correta
-services=("mysql" "nginx" "vod-sync" "vod-sync-worker" "vod-sync-scheduler" "vod-sync-scheduler.timer")
+echo "Iniciando serviços..."
+"$INSTALL_DIR/start.sh"
 
-for service in "${services[@]}"; do
-    print_step "Iniciando $service..."
-    if systemctl enable --now "$service" 2>/dev/null; then
-        sleep 2
-        if systemctl is-active --quiet "$service"; then
-            print_success "$service iniciado"
-        else
-            print_error "$service falhou ao iniciar"
-            journalctl -u "$service" --no-pager -n 20
-        fi
-    else
-        print_error "Falha ao habilitar $service"
-    fi
-done
+sleep 5
 
-# 14. Testar instalação
-print_header "14. TESTE FINAL DA INSTALAÇÃO"
+# 16. Testar instalação
+print_header "16. TESTE FINAL DA INSTALAÇÃO"
 print_step "Verificando serviços..."
 
-# Verificar se tudo está rodando
 ALL_OK=true
+services=("mysql" "redis-server" "nginx" "vod-sync" "vod-sync-worker" "vod-sync-beat")
+
 for service in "${services[@]}"; do
     if systemctl is-active --quiet "$service"; then
         echo "✅ $service: OK"
     else
         echo "❌ $service: FALHOU"
         ALL_OK=false
+        journalctl -u "$service" -n 10 --no-pager
     fi
 done
 
@@ -1813,18 +2552,18 @@ echo "🧠 Memória: $MEM_INFO"
 # Obter IP
 IP=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "127.0.0.1")
 
-# 15. Criar README final
-print_header "15. DOCUMENTAÇÃO FINAL"
+# 17. Criar README final
+print_header "17. DOCUMENTAÇÃO FINAL"
 cat > "$INSTALL_DIR/README.md" << EOF
 # 🎬 VOD Sync XUI - Sistema Instalado com Sucesso!
 
 ## 📋 RESUMO DA INSTALAÇÃO
-- **Versão:** 4.0.0
+- **Versão:** 4.0.0 (Corrigida)
 - **Data:** $(date)
 - **Diretório:** $INSTALL_DIR
 - **URL Principal:** http://$IP
 - **API:** http://$IP/api
-- **Porta:** 80 (HTTP), 5000 (API interna)
+- **Porta:** 80 (HTTP), 5000 (API), 6379 (Redis)
 
 ## 🔧 CONFIGURAÇÕES IMPORTANTES
 
@@ -1836,18 +2575,22 @@ cat > "$INSTALL_DIR/README.md" << EOF
 - **Secret Key:** $SECRET_KEY
 
 ### Banco de Dados
-- **Host:** localhost
+- **MySQL Host:** localhost
 - **Database:** vod_sync_xui
 - **Usuário:** vod_sync_xui
 - **Senha:** $DB_PASSWORD
+
+### Redis
+- **Host:** localhost
+- **Porta:** 6379
+- **DB:** 0
 
 ## 🚀 COMEÇANDO
 
 ### Acesso Rápido
 1. Abra seu navegador: http://$IP
-2. Faça login com: admin / $ADMIN_PASSWORD
-3. Configure suas fontes de VODs
-4. Inicie a sincronização
+2. A interface web será carregada
+3. Use os botões para controlar o sistema
 
 ### Scripts de Gerenciamento
 \`\`\`bash
@@ -1877,11 +2620,14 @@ $INSTALL_DIR/update.sh
 \`\`\`
 $INSTALL_DIR/
 ├── src/              # Código fonte da aplicação
+│   ├── tasks/        # Tarefas Celery
+│   ├── utils/        # Utilitários
+│   └── templates/    # Templates HTML
 ├── venv/             # Ambiente virtual Python
 ├── vods/             # VODs sincronizados
 │   ├── movies/       # Filmes
 │   ├── series/       # Séries
-│   ├── originals/    # Originais (backup)
+│   ├── originals/    # Originais
 │   └── processed/    # Processados
 ├── data/             # Dados do sistema
 │   ├── database/     # Banco SQLite
@@ -1890,7 +2636,6 @@ $INSTALL_DIR/
 ├── logs/             # Logs do sistema
 │   ├── app/          # Aplicação
 │   ├── nginx/        # Nginx
-│   ├── worker/       # Worker
 │   └── cron/         # Tarefas agendadas
 ├── config/           # Arquivos de configuração
 ├── backup/           # Backups automáticos
@@ -1906,25 +2651,24 @@ $INSTALL_DIR/
 - \`GET /api/status\` - Status da API
 - \`GET /api/config\` - Configurações
 
-### Autenticados (API Key)
+### Controle
 - \`POST /api/v1/sync/start\` - Iniciar sincronização
-- \`GET /api/v1/sync/status\` - Status da sincronização
+- \`GET /api/v1/sync/status/<task_id>\` - Status da tarefa
 - \`GET /api/v1/vods\` - Listar VODs
-- \`POST /api/v1/vods/scan\` - Escanear manualmente
-- \`GET /api/v1/system/info\` - Informações do sistema
 
 ## ⚙️ CONFIGURAÇÃO DE SINCRONIZAÇÃO
 
 ### Editar configurações
 \`\`\`bash
 nano $INSTALL_DIR/config/sync_config.json
+nano $INSTALL_DIR/.env
 \`\`\`
 
 ### Configurações principais:
-1. **Fontes de VODs:** Defina seus diretórios locais, FTP ou S3
-2. **Processamento:** Configure transcoding, thumbnails, metadados
-3. **Agendamento:** Defina intervalos de sincronização automática
-4. **Notificações:** Configure alertas por email/telegram
+1. **Fontes de VODs:** Defina diretórios locais em \`sync_config.json\`
+2. **Processamento:** Configure em \`.env\`
+3. **Agendamento:** Automático via Celery Beat
+4. **Notificações:** Configure email/telegram no \`.env\`
 
 ## 🐛 SOLUÇÃO DE PROBLEMAS
 
@@ -1934,21 +2678,23 @@ nano $INSTALL_DIR/config/sync_config.json
 $INSTALL_DIR/logs.sh
 
 # Ver status detalhado
-systemctl status vod-sync --no-pager -l
+$INSTALL_DIR/status.sh
 
-# Testar manualmente
-cd $INSTALL_DIR
-source venv/bin/activate
-python src/app.py
+# Ver logs do systemd
+journalctl -u vod-sync --no-pager -n 50
+journalctl -u vod-sync-worker --no-pager -n 50
 \`\`\`
 
-### Banco de dados com problemas
+### Redis com problemas
 \`\`\`bash
-# Verificar conexão
-mysql -u vod_sync_xui -p"$DB_PASSWORD" -e "SHOW DATABASES;"
+# Verificar status
+systemctl status redis-server
 
-# Recriar banco (cuidado - perde dados!)
-mysql -e "DROP DATABASE vod_sync_xui; CREATE DATABASE vod_sync_xui;"
+# Testar conexão
+redis-cli ping
+
+# Reiniciar
+systemctl restart redis-server
 \`\`\`
 
 ### Nginx não responde
@@ -1965,14 +2711,14 @@ tail -f $INSTALL_DIR/logs/nginx/error.log
 
 ## 🔒 SEGURANÇA
 
-### Alterar senhas padrão
-1. **Admin:** Acesse http://$IP/settings/users
-2. **API Key:** Gere nova em http://$IP/settings/api
-3. **Database:** Altere no arquivo \`.env\` e recrie o banco
+### Alterar senhas
+1. **Admin:** Edite no arquivo \`.env\`
+2. **Database:** Altere no \`.env\` e recrie o usuário MySQL
+3. **API Key:** Gere nova no \`.env\`
 
 ### Firewall recomendado
 \`\`\`bash
-# Instalar UFW (se não tiver)
+# Instalar UFW
 apt install ufw
 
 # Configurar regras
@@ -1984,20 +2730,19 @@ ufw enable
 
 ## 📈 MONITORAMENTO
 
-### Métricas disponíveis
-- Uso de CPU/Memória
-- Espaço em disco dos VODs
-- Contagem de arquivos sincronizados
-- Tempo médio de processamento
-- Taxa de erro/sucesso
+### Métricas
+- Use o script de status: \`$INSTALL_DIR/status.sh\`
+- Verifique logs: \`$INSTALL_DIR/logs.sh\`
+- Monitor Redis: \`redis-cli info\`
 
 ### Acessar métricas
 \`\`\`bash
 # Via API
-curl http://$IP/api/v1/metrics
+curl http://$IP/api/status
+curl http://$IP/health
 
 # Via terminal
-$INSTALL_DIR/status.sh
+$INSTALL_DIR/status.sh | less
 \`\`\`
 
 ## 🔄 ATUALIZAÇÃO
@@ -2006,47 +2751,42 @@ $INSTALL_DIR/status.sh
 \`\`\`bash
 # Execute o script de atualização
 $INSTALL_DIR/update.sh
-
-# Ou manualmente
-cd $INSTALL_DIR
-git pull
-./update.sh
 \`\`\`
 
 ## 📞 SUPORTE
 
 ### Recursos
-- **Documentação:** $INSTALL_DIR/docs/ (se disponível)
 - **Logs:** $INSTALL_DIR/logs/
 - **Configurações:** $INSTALL_DIR/config/
+- **Documentação:** $INSTALL_DIR/README.md
 
 ### Verificar status completo
 \`\`\`bash
-$INSTALL_DIR/status.sh | less
+$INSTALL_DIR/status.sh
 \`\`\`
 
 ---
 
 ## 🎉 INSTALAÇÃO CONCLUÍDA!
 
-Seu sistema VOD Sync XUI está pronto para uso. Comece configurando suas fontes de VODs e inicie a sincronização.
+Seu sistema VOD Sync XUI está pronto para uso.
 
 **Próximos passos:**
-1. Configure suas fontes de VODs na interface web
-2. Ajuste as configurações de processamento conforme necessário
-3. Inicie a sincronização manual ou aguarde a automática
-4. Monitore os logs para garantir que tudo está funcionando
+1. Configure suas fontes de VODs em \`$INSTALL_DIR/config/sync_config.json\`
+2. Ajuste as configurações no arquivo \`.env\`
+3. Acesse http://$IP para usar a interface web
+4. Clique em "Iniciar Sincronização" para começar
 
-**Dica:** Consulte \`$INSTALL_DIR/scripts/\` para mais ferramentas utilitárias.
+**Dica:** Use \`$INSTALL_DIR/status.sh\` para monitorar o sistema.
 EOF
 
-# 16. Mostrar resumo final
+# 18. Mostrar resumo final
 print_header "🎉 INSTALAÇÃO CONCLUÍDA COM SUCESSO!"
 print_divider
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║                 VOD SYNC XUI INSTALADO!                      ║"
-echo "║           Sistema completo de sincronização de VODs          ║"
+echo "║            VOD SYNC XUI 4.0.0 INSTALADO!                     ║"
+echo "║         Sistema corrigido e funcionando!                    ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "📋 RESUMO DA INSTALAÇÃO:"
@@ -2060,6 +2800,7 @@ echo "🔐 Credenciais:"
 echo "   👤 Usuário: admin"
 echo "   🔑 Senha: $ADMIN_PASSWORD"
 echo "   🗝️  API Key: $API_KEY"
+echo "   📊 MySQL Pass: $DB_PASSWORD"
 echo ""
 echo "📁 Diretório:"
 echo "   🗂️  $INSTALL_DIR"
@@ -2070,8 +2811,6 @@ echo "   ⏸️  $INSTALL_DIR/stop.sh     # Parar tudo"
 echo "   🔄 $INSTALL_DIR/restart.sh   # Reiniciar"
 echo "   📊 $INSTALL_DIR/status.sh    # Ver status"
 echo "   📝 $INSTALL_DIR/logs.sh      # Ver logs"
-echo ""
-echo "💾 Backups:"
 echo "   💿 $INSTALL_DIR/backup.sh    # Criar backup"
 echo "   🔄 $INSTALL_DIR/update.sh    # Atualizar sistema"
 echo ""
@@ -2085,18 +2824,19 @@ fi
 echo ""
 echo "🚀 Próximos Passos:"
 echo "   1. Acesse http://$IP no seu navegador"
-echo "   2. Faça login com as credenciais acima"
-echo "   3. Configure suas fontes de VODs"
-echo "   4. Inicie a sincronização"
-echo "   5. Monitore os logs se necessário"
+echo "   2. Configure suas fontes de VODs em:"
+echo "      $INSTALL_DIR/config/sync_config.json"
+echo "   3. Ajuste configurações em: $INSTALL_DIR/.env"
+echo "   4. Clique em 'Iniciar Sincronização' na interface web"
 echo ""
 echo "📚 Documentação:"
 echo "   📖 $INSTALL_DIR/README.md"
 echo ""
-echo "🔔 Notificações:"
-echo "   ⏰ Sincronização automática configurada a cada 5 minutos"
-echo "   💾 Backups automáticos diários às 3:00 AM"
-echo "   🧹 Limpeza automática às 2:00 AM"
+echo "🔔 Funcionalidades:"
+echo "   ⏰ Sincronização automática via Celery Beat"
+echo "   🔄 Worker Celery para processamento paralelo"
+echo "   💾 Backups automáticos semanais"
+echo "   🧹 Limpeza automática diária"
 echo ""
 print_divider
 echo ""
