@@ -18,6 +18,11 @@ Sistema completo para sincronização e gerenciamento de catálogos VODs com pai
 ```bash
 wget https://raw.githubusercontent.com/lamarksak47/sync/main/install.sh && chmod +x install.sh && sudo ./install.sh
 
+APOS INSTALAÇÃO CONFIGURA CONEXÃO COM DB DO XUI 
+```bash
+wget https://raw.githubusercontent.com/lamarksak47/sync/main/db.sh && chmod +x db.sh && sudo ./db.sh
+
+
 2. **Baixe o desistalador:**
 ```bash
 wget https://raw.githubusercontent.com/lamarksak47/sync/main/uninstall.sh && chmod +x uninstall.sh && sudo ./uninstall.sh
