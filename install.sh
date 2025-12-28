@@ -361,7 +361,7 @@ ftputil==5.0.4
 
 # Monitoring
 prometheus-client==0.19.0
-flask-monitoringdashboard==3.1.0
+flask-monitoringdashboard==3.2.0
 
 # Date & Time
 pytz==2023.3
