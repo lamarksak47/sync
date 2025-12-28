@@ -376,8 +376,7 @@ loguru==0.7.2
 Jinja2==3.1.2
 MarkupSafe==2.1.3
 WTForms==3.1.0
-Flask-WTF==1.2.1
-
+Flask-WTF==1.2.14
 # Security
 cryptography==41.0.7
 bcrypt==4.1.2
@@ -385,7 +384,7 @@ passlib==1.7.4
 
 # Data Processing
 pandas==2.0.3
-numpy==1.26.2
+numpy==1.24.4
 
 # Testing
 pytest==7.4.3
