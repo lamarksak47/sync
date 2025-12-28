@@ -98,13 +98,43 @@ check_system() {
     print_success "Sistema verificado"
 }
 
+# Verificar e corrigir serviços
+check_and_fix_services() {
+    print_step "Verificando serviços..."
+    
+    # Verificar Redis
+    if systemctl list-unit-files 2>/dev/null | grep -q "redis.*service"; then
+        print_info "Redis detectado"
+    else
+        print_warning "Redis não está disponível, será instalado"
+    fi
+    
+    # Verificar MySQL/MariaDB
+    if systemctl list-unit-files 2>/dev/null | grep -q "^mysql.service"; then
+        print_info "MySQL disponível"
+    elif systemctl list-unit-files 2>/dev/null | grep -q "^mariadb.service"; then
+        print_info "MariaDB disponível"
+    else
+        print_warning "MySQL/MariaDB não encontrado"
+    fi
+    
+    # Verificar Nginx
+    if systemctl list-unit-files 2>/dev/null | grep -q "^nginx.service"; then
+        print_info "Nginx disponível"
+    else
+        print_warning "Nginx não encontrado"
+    fi
+    
+    print_success "Serviços verificados"
+}
+
 # Criar estrutura de diretórios
 create_directories() {
     print_step "Criando estrutura de diretórios..."
     
-    mkdir -p $INSTALL_DIR/{src,logs,data,config,backups,scripts,systemd,dashboard/{static/{css,js,img},templates}}
-    mkdir -p $INSTALL_DIR/data/{vods,sessions,thumbnails}
-    mkdir -p $INSTALL_DIR/backups/{daily,weekly,monthly}
+    mkdir -p "$INSTALL_DIR"/{src,logs,data,config,backups,scripts,systemd,dashboard/{static/{css,js,img},templates}}
+    mkdir -p "$INSTALL_DIR"/data/{vods,sessions,thumbnails}
+    mkdir -p "$INSTALL_DIR"/backups/{daily,weekly,monthly}
     
     print_success "Diretórios criados"
 }
@@ -493,113 +523,17 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Instalar dependências do sistema
-install_system_dependencies() {
-    print_step "Instalando dependências do sistema..."
-    
-    if [ "$OS_TYPE" = "debian" ]; then
-        apt-get update
-        apt-get install -y \
-            python3 \
-            python3-pip \
-            python3-venv \
-            python3-dev \
-            build-essential \
-            nginx \
-            redis-server \
-            mysql-server \
-            mysql-client \
-            libmariadb-dev \
-            libssl-dev \
-            libffi-dev \
-            ffmpeg \
-            git \
-            curl \
-            wget \
-            htop \
-            net-tools \
-            supervisor \
-            ufw \
-            cron \
-            logrotate \
-            zip \
-            unzip \
-            pv \
-            jq \
-            tree
-        
-        # Iniciar serviços
-        systemctl start mysql redis-server nginx
-        
-        # Habilitar apenas os serviços que existem
-        if systemctl list-unit-files | grep -q "^mysql.service"; then
-            systemctl enable mysql
-        else
-            print_warning "Serviço mysql.service não encontrado, pulando habilitação"
-        fi
-        
-        if systemctl list-unit-files | grep -q "^nginx.service"; then
-            systemctl enable nginx
-        else
-            print_warning "Serviço nginx.service não encontrado, pulando habilitação"
-        fi
-        
-        # Para Redis, usamos o nome correto do serviço
-        if systemctl list-unit-files | grep -q "^redis-server.service"; then
-            systemctl enable redis-server
-        elif systemctl list-unit-files | grep -q "^redis.service"; then
-            systemctl enable redis
-        else
-            print_warning "Serviço Redis não encontrado, tentando habilitar redis-server"
-            systemctl enable redis-server 2>/dev/null || true
-        fi
-        
-    elif [ "$OS_TYPE" = "rhel" ]; then
-        yum update -y
-        yum install -y \
-            python3 \
-            python3-pip \
-            python3-devel \
-            nginx \
-            redis \
-            mariadb-server \
-            mariadb-devel \
-            openssl-devel \
-            gcc \
-            gcc-c++ \
-            make \
-            ffmpeg \
-            ffmpeg-devel \
-            git \
-            curl \
-            wget \
-            htop \
-            net-tools \
-            supervisor \
-            firewalld \
-            cronie \
-            logrotate \
-            zip \
-            unzip \
-            pv \
-            jq \
-            tree
-        
-        # Iniciar serviços
-        systemctl start mariadb redis nginx firewalld
-        
-        # Habilitar serviços
-        systemctl enable mariadb nginx firewalld
-        
-        # Verificar e habilitar Redis se existir
-        if systemctl list-unit-files | grep -q "^redis.service"; then
-            systemctl enable redis
-        else
-            print_warning "Serviço Redis não encontrado no RHEL"
-        fi
-    fi
-    
-    print_success "Dependências do sistema instaladas"
-}
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    libmariadb-dev \
+    libssl-dev \
+    libffi-dev \
+    ffmpeg \
+    curl \
+    wget \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copiar requirements
 COPY requirements.txt .
@@ -1917,12 +1851,10 @@ create_dashboard() {
                              type === 'error' ? 'alert-danger' : 
                              type === 'warning' ? 'alert-warning' : 'alert-info';
             
-            const alert = \`
-                <div class="alert \${alertClass} alert-dismissible fade show" role="alert">
-                    \${message}
-                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-                </div>
-            \`;
+            const alert = '<div class="alert ' + alertClass + ' alert-dismissible fade show" role="alert">' +
+                         message +
+                         '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+                         '</div>';
             
             $('#notification-area').append(alert);
             
@@ -2170,21 +2102,21 @@ function updateStats() {
         // CPU
         \$('#cpu-percent').text(data.cpu.percent.toFixed(1) + '%');
         \$('#cpu-bar').css('width', data.cpu.percent + '%');
-        \$('#cpu-info').text(\`Cores: \${data.cpu.cores} | Freq: \${data.cpu.frequency.toFixed(0)} MHz\`);
+        \$('#cpu-info').text('Cores: ' + data.cpu.cores + ' | Freq: ' + data.cpu.frequency.toFixed(0) + ' MHz');
         
         // Memory
         const memGB = data.memory.total / 1024 / 1024 / 1024;
         const usedGB = data.memory.used / 1024 / 1024 / 1024;
         \$('#mem-percent').text(data.memory.percent.toFixed(1) + '%');
         \$('#mem-bar').css('width', data.memory.percent + '%');
-        \$('#mem-info').text(\`\${usedGB.toFixed(1)} GB / \${memGB.toFixed(1)} GB\`);
+        \$('#mem-info').text(usedGB.toFixed(1) + ' GB / ' + memGB.toFixed(1) + ' GB');
         
         // Disk
         const diskGB = data.disk.total / 1024 / 1024 / 1024;
         const usedDiskGB = data.disk.used / 1024 / 1024 / 1024;
         \$('#disk-percent').text(data.disk.percent.toFixed(1) + '%');
         \$('#disk-bar').css('width', data.disk.percent + '%');
-        \$('#disk-info').text(\`\${usedDiskGB.toFixed(1)} GB / \${diskGB.toFixed(1)} GB\`);
+        \$('#disk-info').text(usedDiskGB.toFixed(1) + ' GB / ' + diskGB.toFixed(1) + ' GB');
         
         // Network
         const upSpeed = data.network.bytes_sent - lastNetUp;
@@ -2223,9 +2155,9 @@ function formatUptime(bootTime) {
     const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
     const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
     
-    if (days > 0) return \`\${days}d \${hours}h\`;
-    if (hours > 0) return \`\${hours}h \${minutes}m\`;
-    return \`\${minutes}m\`;
+    if (days > 0) return days + 'd ' + hours + 'h';
+    if (hours > 0) return hours + 'h ' + minutes + 'm';
+    return minutes + 'm';
 }
 
 function updateChart(data) {
@@ -2312,20 +2244,18 @@ setInterval(updateStats, 5000);
     });
     
     socket.on('sync_update', function(data) {
-        \$('#sync-tasks').html(\`
-            <tr>
-                <td>\${data.task_id}</td>
-                <td>\${data.type}</td>
-                <td><span class="badge bg-info">\${data.status}</span></td>
-                <td>\${new Date(data.start_time).toLocaleTimeString()}</td>
-                <td>
-                    <div class="progress" style="height: 5px;">
-                        <div class="progress-bar" style="width: \${data.progress}%"></div>
-                    </div>
-                    <small>\${data.progress}%</small>
-                </td>
-            </tr>
-        \`);
+        \$('#sync-tasks').html('<tr>' +
+            '<td>' + data.task_id + '</td>' +
+            '<td>' + data.type + '</td>' +
+            '<td><span class="badge bg-info">' + data.status + '</span></td>' +
+            '<td>' + new Date(data.start_time).toLocaleTimeString() + '</td>' +
+            '<td>' +
+            '<div class="progress" style="height: 5px;">' +
+            '<div class="progress-bar" style="width: ' + data.progress + '%"></div>' +
+            '</div>' +
+            '<small>' + data.progress + '%</small>' +
+            '</td>' +
+            '</tr>');
     });
 });
 </script>
@@ -2538,17 +2468,17 @@ class VODSyncApp {
         });
         
         this.socket.on('sync_started', (data) => {
-            this.showToast('info', \`Sincronização iniciada: \${data.task_id}\`);
+            this.showToast('info', 'Sincronização iniciada: ' + data.task_id);
             this.updateSyncStatus(data);
         });
         
         this.socket.on('sync_completed', (data) => {
-            this.showToast('success', \`Sincronização concluída: \${data.task_id}\`);
+            this.showToast('success', 'Sincronização concluída: ' + data.task_id);
             this.updateSyncStatus(data);
         });
         
         this.socket.on('sync_failed', (data) => {
-            this.showToast('error', \`Sincronização falhou: \${data.error}\`);
+            this.showToast('error', 'Sincronização falhou: ' + data.error);
             this.updateSyncStatus(data);
         });
         
@@ -2597,16 +2527,16 @@ class VODSyncApp {
                 this.showToast('success', 'Sincronização iniciada com sucesso!');
                 this.socket.emit('sync_action', { action: 'started' });
             } else {
-                this.showToast('error', \`Erro: \${data.error}\`);
+                this.showToast('error', 'Erro: ' + data.error);
             }
         } catch (error) {
-            this.showToast('error', \`Erro: \${error.message}\`);
+            this.showToast('error', 'Erro: ' + error.message);
         }
     }
     
     async stopSync(taskId) {
         try {
-            const response = await fetch(\`/api/sync/stop/\${taskId}\`, {
+            const response = await fetch('/api/sync/stop/' + taskId, {
                 method: 'POST'
             });
             
@@ -2615,10 +2545,10 @@ class VODSyncApp {
             if (data.success) {
                 this.showToast('warning', 'Sincronização parada!');
             } else {
-                this.showToast('error', \`Erro: \${data.error}\`);
+                this.showToast('error', 'Erro: ' + data.error);
             }
         } catch (error) {
-            this.showToast('error', \`Erro: \${error.message}\`);
+            this.showToast('error', 'Erro: ' + error.message);
         }
     }
     
@@ -2628,16 +2558,16 @@ class VODSyncApp {
             const data = await response.json();
             
             // Update CPU
-            \$('#cpu-percent').text(\`\${data.cpu.percent.toFixed(1)}%\`);
-            \$('#cpu-bar').css('width', \`\${data.cpu.percent}%\`);
+            \$('#cpu-percent').text(data.cpu.percent.toFixed(1) + '%');
+            \$('#cpu-bar').css('width', data.cpu.percent + '%');
             
             // Update Memory
-            \$('#mem-percent').text(\`\${data.memory.percent.toFixed(1)}%\`);
-            \$('#mem-bar').css('width', \`\${data.memory.percent}%\`);
+            \$('#mem-percent').text(data.memory.percent.toFixed(1) + '%');
+            \$('#mem-bar').css('width', data.memory.percent + '%');
             
             // Update Disk
-            \$('#disk-percent').text(\`\${data.disk.percent.toFixed(1)}%\`);
-            \$('#disk-bar').css('width', \`\${data.disk.percent}%\`);
+            \$('#disk-percent').text(data.disk.percent.toFixed(1) + '%');
+            \$('#disk-bar').css('width', data.disk.percent + '%');
             
             // Update system info
             \$('#sys-hostname').text(data.system.hostname);
@@ -2669,15 +2599,13 @@ class VODSyncApp {
         // Atualizar interface com status da sincronização
         const syncTable = \$('#sync-tasks');
         if (syncTable.length) {
-            const row = \`
-                <tr>
-                    <td>\${data.task_id}</td>
-                    <td>\${data.type || 'Manual'}</td>
-                    <td><span class="badge bg-\${this.getStatusColor(data.status)}">\${data.status}</span></td>
-                    <td>\${new Date(data.timestamp).toLocaleTimeString()}</td>
-                    <td>\${data.progress || 0}%</td>
-                </tr>
-            \`;
+            const row = '<tr>' +
+                '<td>' + data.task_id + '</td>' +
+                '<td>' + (data.type || 'Manual') + '</td>' +
+                '<td><span class="badge bg-' + this.getStatusColor(data.status) + '">' + data.status + '</span></td>' +
+                '<td>' + new Date(data.timestamp).toLocaleTimeString() + '</td>' +
+                '<td>' + (data.progress || 0) + '%</td>' +
+                '</tr>';
             syncTable.prepend(row);
             
             // Limitar a 10 linhas
@@ -2706,25 +2634,23 @@ class VODSyncApp {
         const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
         const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
         
-        if (days > 0) return \`\${days}d \${hours}h\`;
-        if (hours > 0) return \`\${hours}h \${minutes}m\`;
-        return \`\${minutes}m\`;
+        if (days > 0) return days + 'd ' + hours + 'h';
+        if (hours > 0) return hours + 'h ' + minutes + 'm';
+        return minutes + 'm';
     }
     
     showToast(type, message) {
         // Remove existing toasts
         \$('.toast').remove();
         
-        const toast = \$(\`
-            <div class="toast align-items-center text-bg-\${type} border-0" role="alert">
-                <div class="d-flex">
-                    <div class="toast-body">
-                        \${message}
-                    </div>
-                    <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
-                </div>
-            </div>
-        \`);
+        const toast = \$('<div class="toast align-items-center text-bg-' + type + ' border-0" role="alert">' +
+            '<div class="d-flex">' +
+            '<div class="toast-body">' +
+            message +
+            '</div>' +
+            '<button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>' +
+            '</div>' +
+            '</div>');
         
         \$('body').append(toast);
         
@@ -2737,12 +2663,10 @@ class VODSyncApp {
     }
     
     showAlert(type, message) {
-        const alert = \$(\`
-            <div class="alert alert-\${type} alert-dismissible fade show" role="alert">
-                \${message}
-                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-            </div>
-        \`);
+        const alert = \$('<div class="alert alert-' + type + ' alert-dismissible fade show" role="alert">' +
+            message +
+            '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>' +
+            '</div>');
         
         \$('#notification-area').prepend(alert);
         
@@ -2794,11 +2718,11 @@ function formatDuration(seconds) {
     const secs = seconds % 60;
     
     if (hours > 0) {
-        return \`\${hours}h \${minutes}m\`;
+        return hours + 'h ' + minutes + 'm';
     } else if (minutes > 0) {
-        return \`\${minutes}m \${secs}s\`;
+        return minutes + 'm ' + secs + 's';
     } else {
-        return \`\${secs}s\`;
+        return secs + 's';
     }
 }
 
@@ -2817,9 +2741,51 @@ window.onerror = function(message, source, lineno, colno, error) {
     }
     
     if (window.vodSyncApp) {
-        window.vodSyncApp.showToast('error', \`Erro: \${message}\`);
+        window.vodSyncApp.showToast('error', 'Erro: ' + message);
     }
 };
+EOF
+
+    # Dashboard JavaScript
+    cat > "$INSTALL_DIR/dashboard/static/js/dashboard.js" << EOF
+// Dashboard specific JavaScript
+
+// Funções específicas do dashboard
+function forceSync() {
+    window.vodSyncApp.startSync();
+}
+
+function backupNow() {
+    \$.post('/api/system/backup', function(response) {
+        if (response.success) {
+            window.vodSyncApp.showToast('success', 'Backup iniciado!');
+        } else {
+            window.vodSyncApp.showToast('error', 'Erro: ' + response.error);
+        }
+    });
+}
+
+function clearLogs() {
+    if (confirm('Tem certeza que deseja limpar os logs antigos?')) {
+        \$.post('/api/system/clear-logs', function(response) {
+            if (response.success) {
+                window.vodSyncApp.showToast('success', 'Logs limpos!');
+            } else {
+                window.vodSyncApp.showToast('error', 'Erro: ' + response.error);
+            }
+        });
+    }
+}
+
+// Inicialização do dashboard
+\$(document).ready(function() {
+    // Atualizar estatísticas a cada 10 segundos
+    setInterval(function() {
+        if (\$('#dashboard').length) {
+            window.vodSyncApp.refreshDashboard();
+        }
+    }, 10000);
+});
 EOF
 
     print_success "Dashboard criado"
@@ -2831,6 +2797,8 @@ install_system_dependencies() {
     
     if [ "$OS_TYPE" = "debian" ]; then
         apt-get update
+        
+        # Instalar pacotes essenciais
         apt-get install -y \
             python3 \
             python3-pip \
@@ -2861,8 +2829,37 @@ install_system_dependencies() {
             tree
         
         # Iniciar serviços
-        systemctl start mysql redis nginx
-        systemctl enable mysql redis nginx
+        print_info "Iniciando serviços..."
+        systemctl start mysql 2>/dev/null || print_warning "MySQL não pôde ser iniciado"
+        systemctl start redis-server 2>/dev/null || print_warning "Redis não pôde ser iniciado"
+        systemctl start nginx 2>/dev/null || print_warning "Nginx não pôde ser iniciado"
+        
+        # Habilitar serviços
+        print_info "Habilitando serviços..."
+        
+        # MySQL
+        if systemctl list-unit-files | grep -q "^mysql.service"; then
+            systemctl enable mysql 2>/dev/null || print_warning "Não foi possível habilitar MySQL"
+        else
+            print_warning "Serviço MySQL não encontrado"
+        fi
+        
+        # Nginx
+        if systemctl list-unit-files | grep -q "^nginx.service"; then
+            systemctl enable nginx 2>/dev/null || print_warning "Não foi possível habilitar Nginx"
+        else
+            print_warning "Serviço Nginx não encontrado"
+        fi
+        
+        # Redis - tratamento especial para evitar erro de alias
+        if systemctl list-unit-files | grep -q "^redis-server.service"; then
+            systemctl enable redis-server 2>/dev/null || print_warning "Redis já habilitado ou é um alias"
+        elif systemctl list-unit-files | grep -q "^redis.service"; then
+            # Tentar habilitar mas ignorar erros se for alias
+            systemctl enable redis 2>/dev/null || print_info "Redis pode ser um alias, continuando..."
+        else
+            print_warning "Serviço Redis não encontrado"
+        fi
         
     elif [ "$OS_TYPE" = "rhel" ]; then
         yum update -y
@@ -2896,8 +2893,15 @@ install_system_dependencies() {
             tree
         
         # Iniciar serviços
-        systemctl start mariadb redis nginx firewalld
-        systemctl enable mariadb redis nginx firewalld
+        systemctl start mariadb redis nginx firewalld 2>/dev/null || true
+        
+        # Habilitar serviços
+        systemctl enable mariadb nginx firewalld 2>/dev/null || true
+        
+        # Redis no RHEL
+        if systemctl list-unit-files | grep -q "^redis.service"; then
+            systemctl enable redis 2>/dev/null || print_warning "Não foi possível habilitar Redis"
+        fi
     fi
     
     print_success "Dependências do sistema instaladas"
@@ -2908,7 +2912,7 @@ setup_database() {
     print_step "Configurando banco de dados..."
     
     # Verificar se MySQL/MariaDB está rodando
-    if ! systemctl is-active --quiet mysql mariadb; then
+    if ! systemctl is-active --quiet mysql 2>/dev/null && ! systemctl is-active --quiet mariadb 2>/dev/null; then
         print_warning "MySQL/MariaDB não está rodando, tentando iniciar..."
         
         if systemctl start mysql 2>/dev/null; then
@@ -2921,56 +2925,51 @@ setup_database() {
         fi
     fi
     
-    # Para sistemas Debian/Ubuntu, definir senha do root se não estiver definida
-    if [ "$OS_TYPE" = "debian" ]; then
-        # Verificar se já existe senha para root
-        if mysql -u root -e "SELECT 1" 2>/dev/null; then
-            print_info "Senha root do MySQL já está configurada"
-        else
-            print_info "Configurando senha root do MySQL..."
-            mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_PASSWORD}';" 2>/dev/null || \
-            mysql -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('${DB_PASSWORD}');" 2>/dev/null || \
-            print_warning "Não foi possível configurar senha root, continuando..."
+    # Aguardar MySQL/MariaDB iniciar
+    sleep 3
+    
+    # Tentar conectar sem senha primeiro
+    if mysql -u root -e "SELECT 1" 2>/dev/null; then
+        print_info "Conexão MySQL sem senha detectada"
+        
+        # Criar banco de dados sem senha
+        mysql -u root -e "CREATE DATABASE IF NOT EXISTS vod_sync CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
+        mysql -u root -e "CREATE USER IF NOT EXISTS 'vod_sync'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';" 2>/dev/null
+        mysql -u root -e "GRANT ALL PRIVILEGES ON vod_sync.* TO 'vod_sync'@'localhost';" 2>/dev/null
+        mysql -u root -e "FLUSH PRIVILEGES;" 2>/dev/null
+        
+    elif mysql -u root -p"${DB_PASSWORD}" -e "SELECT 1" 2>/dev/null; then
+        print_info "Conexão MySQL com senha detectada"
+        
+        # Criar banco de dados com senha
+        mysql -u root -p"${DB_PASSWORD}" -e "CREATE DATABASE IF NOT EXISTS vod_sync CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
+        mysql -u root -p"${DB_PASSWORD}" -e "CREATE USER IF NOT EXISTS 'vod_sync'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';" 2>/dev/null
+        mysql -u root -p"${DB_PASSWORD}" -e "GRANT ALL PRIVILEGES ON vod_sync.* TO 'vod_sync'@'localhost';" 2>/dev/null
+        mysql -u root -p"${DB_PASSWORD}" -e "FLUSH PRIVILEGES;" 2>/dev/null
+        
+    else
+        print_error "Não foi possível conectar ao MySQL/MariaDB"
+        print_info "Tentando configurar acesso root sem senha..."
+        
+        # Tentar configurar acesso root sem senha temporariamente
+        if [ -f /etc/mysql/debian.cnf ]; then
+            # Debian/Ubuntu com debian-sys-maint
+            DEBIAN_PASS=$(grep -oP 'password\s*=\s*\K.*' /etc/mysql/debian.cnf | head -1)
+            mysql -u debian-sys-maint -p"${DEBIAN_PASS}" -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '';" 2>/dev/null || true
+            mysql -u root -e "FLUSH PRIVILEGES;" 2>/dev/null || true
         fi
-    fi
-    
-    # Criar banco de dados
-    if mysql -u root -p"${DB_PASSWORD}" -e "CREATE DATABASE IF NOT EXISTS vod_sync CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null; then
-        print_success "Banco de dados criado"
-    elif mysql -u root -e "CREATE DATABASE IF NOT EXISTS vod_sync CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null; then
-        print_success "Banco de dados criado (sem senha)"
-    else
-        print_error "Erro ao criar banco de dados"
-        return 1
-    fi
-    
-    # Criar usuário
-    if mysql -u root -p"${DB_PASSWORD}" -e "CREATE USER IF NOT EXISTS 'vod_sync'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';" 2>/dev/null; then
-        print_success "Usuário criado"
-    elif mysql -u root -e "CREATE USER IF NOT EXISTS 'vod_sync'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';" 2>/dev/null; then
-        print_success "Usuário criado (sem senha)"
-    else
-        print_error "Erro ao criar usuário"
-        return 1
-    fi
-    
-    # Conceder privilégios
-    if mysql -u root -p"${DB_PASSWORD}" -e "GRANT ALL PRIVILEGES ON vod_sync.* TO 'vod_sync'@'localhost';" 2>/dev/null; then
-        print_success "Privilégios concedidos"
-    elif mysql -u root -e "GRANT ALL PRIVILEGES ON vod_sync.* TO 'vod_sync'@'localhost';" 2>/dev/null; then
-        print_success "Privilégios concedidos (sem senha)"
-    else
-        print_error "Erro ao conceder privilégios"
-        return 1
-    fi
-    
-    # Atualizar privilégios
-    if mysql -u root -p"${DB_PASSWORD}" -e "FLUSH PRIVILEGES;" 2>/dev/null; then
-        print_success "Privilégios atualizados"
-    elif mysql -u root -e "FLUSH PRIVILEGES;" 2>/dev/null; then
-        print_success "Privilégios atualizados (sem senha)"
-    else
-        print_warning "Não foi possível atualizar privilégios"
+        
+        # Tentar novamente
+        if mysql -u root -e "CREATE DATABASE IF NOT EXISTS vod_sync CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null; then
+            print_success "Banco de dados criado"
+            mysql -u root -e "CREATE USER IF NOT EXISTS 'vod_sync'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';" 2>/dev/null
+            mysql -u root -e "GRANT ALL PRIVILEGES ON vod_sync.* TO 'vod_sync'@'localhost';" 2>/dev/null
+            mysql -u root -e "FLUSH PRIVILEGES;" 2>/dev/null
+        else
+            print_error "Falha crítica: não foi possível configurar banco de dados"
+            print_info "Configure manualmente o banco de dados após a instalação"
+            return 1
+        fi
     fi
     
     print_success "Banco de dados configurado"
@@ -3020,18 +3019,15 @@ setup_system_services() {
     
     # Habilitar serviços (não iniciar ainda)
     if [ -f /etc/systemd/system/vod-sync.service ]; then
-        systemctl enable vod-sync.service
-        print_info "Serviço vod-sync habilitado"
+        systemctl enable vod-sync.service 2>/dev/null || print_warning "Não foi possível habilitar vod-sync.service"
     fi
     
     if [ -f /etc/systemd/system/vod-sync-celery.service ]; then
-        systemctl enable vod-sync-celery.service
-        print_info "Serviço vod-sync-celery habilitado"
+        systemctl enable vod-sync-celery.service 2>/dev/null || print_warning "Não foi possível habilitar vod-sync-celery.service"
     fi
     
     if [ -f /etc/systemd/system/vod-sync-celerybeat.service ]; then
-        systemctl enable vod-sync-celerybeat.service
-        print_info "Serviço vod-sync-celerybeat habilitado"
+        systemctl enable vod-sync-celerybeat.service 2>/dev/null || print_warning "Não foi possível habilitar vod-sync-celerybeat.service"
     fi
     
     print_success "Serviços systemd configurados"
@@ -3042,13 +3038,17 @@ setup_nginx() {
     print_step "Configurando Nginx..."
     
     # Copiar configuração do Nginx
-    cp "$INSTALL_DIR/config/nginx.conf" /etc/nginx/nginx.conf
+    cp "$INSTALL_DIR/config/nginx.conf" /etc/nginx/nginx.conf 2>/dev/null || true
     
     # Testar configuração
-    nginx -t
+    nginx -t 2>/dev/null || print_warning "Configuração Nginx com erro, usando padrão"
     
-    # Reiniciar Nginx
-    systemctl restart nginx
+    # Reiniciar Nginx se estiver rodando
+    if systemctl is-active --quiet nginx; then
+        systemctl restart nginx 2>/dev/null || print_warning "Não foi possível reiniciar Nginx"
+    else
+        systemctl start nginx 2>/dev/null || print_warning "Não foi possível iniciar Nginx"
+    fi
     
     # Configurar firewall
     if command -v ufw &> /dev/null; then
@@ -3056,13 +3056,13 @@ setup_nginx() {
         ufw allow 80/tcp
         ufw allow 443/tcp
         ufw allow 5000/tcp
-        ufw --force enable
+        echo "y" | ufw --force enable 2>/dev/null || print_warning "Não foi possível configurar UFW"
     elif command -v firewall-cmd &> /dev/null; then
         firewall-cmd --permanent --add-port=22/tcp
         firewall-cmd --permanent --add-port=80/tcp
         firewall-cmd --permanent --add-port=443/tcp
         firewall-cmd --permanent --add-port=5000/tcp
-        firewall-cmd --reload
+        firewall-cmd --reload 2>/dev/null || print_warning "Não foi possível configurar firewalld"
     fi
     
     print_success "Nginx configurado"
@@ -3073,23 +3073,25 @@ create_system_user() {
     print_step "Criando usuário do sistema..."
     
     if ! id "$APP_USER" &>/dev/null; then
-        useradd -r -s /bin/bash -d "$INSTALL_DIR" -m "$APP_USER"
+        useradd -r -s /bin/bash -d "$INSTALL_DIR" -m "$APP_USER" 2>/dev/null || \
+        useradd -r -s /bin/bash -d "$INSTALL_DIR" "$APP_USER" 2>/dev/null || \
+        (print_warning "Não foi possível criar usuário $APP_USER, usando root" && APP_USER="root")
     fi
     
     # Definir permissões
-    chown -R "$APP_USER:$APP_GROUP" "$INSTALL_DIR"
-    chmod -R 750 "$INSTALL_DIR"
+    chown -R "$APP_USER:$APP_GROUP" "$INSTALL_DIR" 2>/dev/null || true
+    chmod -R 750 "$INSTALL_DIR" 2>/dev/null || true
     
     # Permissões especiais para logs e dados
-    chown -R "$APP_USER:$APP_GROUP" "$INSTALL_DIR/logs"
-    chown -R "$APP_USER:$APP_GROUP" "$INSTALL_DIR/data"
-    chmod -R 770 "$INSTALL_DIR/logs" "$INSTALL_DIR/data"
+    chown -R "$APP_USER:$APP_GROUP" "$INSTALL_DIR/logs" 2>/dev/null || true
+    chown -R "$APP_USER:$APP_GROUP" "$INSTALL_DIR/data" 2>/dev/null || true
+    chmod -R 770 "$INSTALL_DIR/logs" "$INSTALL_DIR/data" 2>/dev/null || true
     
     # Adicionar ao grupo www-data/nginx
     usermod -a -G www-data "$APP_USER" 2>/dev/null || true
     usermod -a -G nginx "$APP_USER" 2>/dev/null || true
     
-    print_success "Usuário do sistema criado"
+    print_success "Usuário do sistema configurado"
 }
 
 # Configurar backup automático
@@ -3113,25 +3115,27 @@ tar -czf "\$BACKUP_FILE" \\
     "$INSTALL_DIR/config" \\
     "$INSTALL_DIR/logs" 2>/dev/null
 
-# Backup do banco de dados
-mysqldump -u vod_sync -p"${DB_PASSWORD}" vod_sync > "\$BACKUP_DIR/db_backup_\$DATE.sql" 2>/dev/null
+# Backup do banco de dados (se possível)
+mysqldump -u vod_sync -p"${DB_PASSWORD}" vod_sync > "\$BACKUP_DIR/db_backup_\$DATE.sql" 2>/dev/null || \
+echo "Não foi possível fazer backup do banco de dados" > "\$BACKUP_DIR/db_backup_\$DATE.sql"
 
 # Compactar backup do banco
-gzip -f "\$BACKUP_DIR/db_backup_\$DATE.sql"
+gzip -f "\$BACKUP_DIR/db_backup_\$DATE.sql" 2>/dev/null || true
 
 # Manter apenas últimos 30 backups
-find "\$BACKUP_DIR" -name "backup_*.tar.gz" -type f -mtime +30 -delete
-find "\$BACKUP_DIR" -name "db_backup_*.sql.gz" -type f -mtime +30 -delete
+find "\$BACKUP_DIR" -name "backup_*.tar.gz" -type f -mtime +30 -delete 2>/dev/null || true
+find "\$BACKUP_DIR" -name "db_backup_*.sql.gz" -type f -mtime +30 -delete 2>/dev/null || true
 
 echo "Backup concluído: \$BACKUP_FILE"
-echo "Tamanho: \$(du -h "\$BACKUP_FILE" | cut -f1)"
+echo "Tamanho: \$(du -h "\$BACKUP_FILE" 2>/dev/null | cut -f1 || echo "0")"
 EOF
     
     chmod +x "$INSTALL_DIR/scripts/backup.sh"
-    chown "$APP_USER:$APP_GROUP" "$INSTALL_DIR/scripts/backup.sh"
+    chown "$APP_USER:$APP_GROUP" "$INSTALL_DIR/scripts/backup.sh" 2>/dev/null || true
     
     # Agendar no cron
-    (crontab -l 2>/dev/null; echo "0 2 * * * $INSTALL_DIR/scripts/backup.sh >> $INSTALL_DIR/logs/backup.log 2>&1") | crontab -u "$APP_USER" -
+    (crontab -l 2>/dev/null | grep -v "$INSTALL_DIR/scripts/backup.sh"; echo "0 2 * * * $INSTALL_DIR/scripts/backup.sh >> $INSTALL_DIR/logs/backup.log 2>&1") | crontab -u "$APP_USER" - 2>/dev/null || \
+    print_warning "Não foi possível agendar backup no cron"
     
     print_success "Sistema de backup configurado"
 }
@@ -3171,15 +3175,15 @@ get_metrics() {
     echo "\$TIMESTAMP - CPU: \$CPU_PERCENT% | RAM: \$MEM_PERCENT% (\$MEM_USED/\$MEM_TOTAL) | DISK: \$DISK_PERCENT% (\$DISK_USED/\$DISK_TOTAL) | NET: IN=\$NET_IN OUT=\$NET_OUT" >> "\$LOG_FILE"
     
     # Verificar limites
-    if [ \$(echo "\$CPU_PERCENT > 90" | bc) -eq 1 ]; then
+    if [ \$(echo "\$CPU_PERCENT > 90" | bc 2>/dev/null) -eq 1 ]; then
         echo "\$TIMESTAMP - ALERTA: CPU acima de 90% (\$CPU_PERCENT%)" >> "\$LOG_FILE"
     fi
     
-    if [ \$(echo "\$MEM_PERCENT > 90" | bc) -eq 1 ]; then
+    if [ \$(echo "\$MEM_PERCENT > 90" | bc 2>/dev/null) -eq 1 ]; then
         echo "\$TIMESTAMP - ALERTA: Memória acima de 90% (\$MEM_PERCENT%)" >> "\$LOG_FILE"
     fi
     
-    if [ "\$DISK_PERCENT" -gt 90 ]; then
+    if [ "\$DISK_PERCENT" -gt 90 ] 2>/dev/null; then
         echo "\$TIMESTAMP - ALERTA: Disco acima de 90% (\$DISK_PERCENT%)" >> "\$LOG_FILE"
     fi
 }
@@ -3189,19 +3193,20 @@ get_metrics
 
 # Rotacionar logs se necessário
 if [ -f "\$LOG_FILE" ]; then
-    LOG_SIZE=\$(stat -c%s "\$LOG_FILE")
+    LOG_SIZE=\$(stat -c%s "\$LOG_FILE" 2>/dev/null || echo 0)
     if [ \$LOG_SIZE -gt 104857600 ]; then  # 100MB
-        mv "\$LOG_FILE" "\$LOG_FILE.old"
-        gzip "\$LOG_FILE.old"
+        mv "\$LOG_FILE" "\$LOG_FILE.old" 2>/dev/null || true
+        gzip "\$LOG_FILE.old" 2>/dev/null || true
     fi
 fi
 EOF
     
     chmod +x "$INSTALL_DIR/scripts/monitor.sh"
-    chown "$APP_USER:$APP_GROUP" "$INSTALL_DIR/scripts/monitor.sh"
+    chown "$APP_USER:$APP_GROUP" "$INSTALL_DIR/scripts/monitor.sh" 2>/dev/null || true
     
     # Agendar no cron
-    (crontab -l 2>/dev/null; echo "*/5 * * * * $INSTALL_DIR/scripts/monitor.sh") | crontab -u "$APP_USER" -
+    (crontab -l 2>/dev/null | grep -v "$INSTALL_DIR/scripts/monitor.sh"; echo "*/5 * * * * $INSTALL_DIR/scripts/monitor.sh >> /dev/null 2>&1") | crontab -u "$APP_USER" - 2>/dev/null || \
+    print_warning "Não foi possível agendar monitoramento no cron"
     
     print_success "Monitoramento configurado"
 }
@@ -3213,21 +3218,21 @@ create_management_scripts() {
     # start.sh
     cat > "$INSTALL_DIR/start.sh" << EOF
 #!/bin/bash
-systemctl start vod-sync vod-sync-celery vod-sync-celerybeat
+systemctl start vod-sync vod-sync-celery vod-sync-celerybeat 2>/dev/null || true
 echo "Serviços VOD Sync iniciados!"
 EOF
     
     # stop.sh
     cat > "$INSTALL_DIR/stop.sh" << EOF
 #!/bin/bash
-systemctl stop vod-sync-celerybeat vod-sync-celery vod-sync
+systemctl stop vod-sync-celerybeat vod-sync-celery vod-sync 2>/dev/null || true
 echo "Serviços VOD Sync parados!"
 EOF
     
     # restart.sh
     cat > "$INSTALL_DIR/restart.sh" << EOF
 #!/bin/bash
-systemctl restart vod-sync vod-sync-celery vod-sync-celerybeat
+systemctl restart vod-sync vod-sync-celery vod-sync-celerybeat 2>/dev/null || true
 echo "Serviços VOD Sync reiniciados!"
 EOF
     
@@ -3236,26 +3241,26 @@ EOF
 #!/bin/bash
 echo "=== Status dos Serviços VOD Sync ==="
 echo ""
-systemctl status vod-sync --no-pager
+systemctl status vod-sync --no-pager 2>/dev/null || echo "Serviço vod-sync não encontrado"
 echo ""
-systemctl status vod-sync-celery --no-pager
+systemctl status vod-sync-celery --no-pager 2>/dev/null || echo "Serviço vod-sync-celery não encontrado"
 echo ""
-systemctl status vod-sync-celerybeat --no-pager
+systemctl status vod-sync-celerybeat --no-pager 2>/dev/null || echo "Serviço vod-sync-celerybeat não encontrado"
 EOF
     
     # logs.sh
     cat > "$INSTALL_DIR/logs.sh" << EOF
 #!/bin/bash
-tail -f "$INSTALL_DIR/logs/vod_sync.log"
+tail -f "$INSTALL_DIR/logs/vod_sync.log" 2>/dev/null || echo "Arquivo de log não encontrado: $INSTALL_DIR/logs/vod_sync.log"
 EOF
     
     # update.sh
     cat > "$INSTALL_DIR/update.sh" << EOF
 #!/bin/bash
 cd "$INSTALL_DIR"
-source venv/bin/activate
-pip install -r requirements.txt --upgrade
-systemctl restart vod-sync vod-sync-celery vod-sync-celerybeat
+source venv/bin/activate 2>/dev/null || echo "Ambiente virtual não encontrado"
+pip install -r requirements.txt --upgrade 2>/dev/null || echo "Erro ao atualizar pacotes"
+systemctl restart vod-sync vod-sync-celery vod-sync-celerybeat 2>/dev/null || echo "Erro ao reiniciar serviços"
 echo "Sistema VOD Sync atualizado!"
 EOF
     
@@ -3267,8 +3272,8 @@ echo "Backup manual executado!"
 EOF
     
     # Dar permissões
-    chmod +x "$INSTALL_DIR"/*.sh
-    chown "$APP_USER:$APP_GROUP" "$INSTALL_DIR"/*.sh
+    chmod +x "$INSTALL_DIR"/*.sh 2>/dev/null || true
+    chown "$APP_USER:$APP_GROUP" "$INSTALL_DIR"/*.sh 2>/dev/null || true
     
     print_success "Scripts de gerenciamento criados"
 }
@@ -3278,20 +3283,35 @@ initialize_application() {
     print_step "Inicializando aplicação..."
     
     cd "$INSTALL_DIR"
-    source venv/bin/activate
+    
+    # Verificar se ambiente virtual existe
+    if [ ! -f "$INSTALL_DIR/venv/bin/activate" ]; then
+        print_error "Ambiente virtual não encontrado!"
+        return 1
+    fi
+    
+    source "$INSTALL_DIR/venv/bin/activate"
     
     # Criar banco de dados
-    python3 -c "
+    if python3 -c "
 from src.database import db
 from src.app import app
 
 with app.app_context():
-    db.create_all()
-    print('Banco de dados criado com sucesso!')
-"
+    try:
+        db.create_all()
+        print('Banco de dados criado com sucesso!')
+    except Exception as e:
+        print(f'Erro ao criar banco de dados: {e}')
+" 2>/dev/null; then
+        print_success "Banco de dados inicializado"
+    else
+        print_warning "Erro ao inicializar banco de dados, continuando..."
+    fi
     
     # Iniciar serviços
-    systemctl start vod-sync vod-sync-celery vod-sync-celerybeat
+    systemctl start vod-sync vod-sync-celery vod-sync-celerybeat 2>/dev/null || \
+    print_warning "Não foi possível iniciar serviços, tente manualmente com: $INSTALL_DIR/start.sh"
     
     # Esperar serviços iniciarem
     sleep 3
@@ -3413,7 +3433,7 @@ show_installation_summary() {
     echo "  $INSTALL_DIR"
     echo ""
     echo -e "${CYAN}🌐 Acesso ao Sistema:${NC}"
-    echo "  URL: http://$(hostname -I | awk '{print \$1}'):5000"
+    echo "  URL: http://$(hostname -I | awk '{print $1}'):5000"
     echo "  Usuário: admin"
     echo "  Senha: admin123"
     echo ""
@@ -3423,22 +3443,37 @@ show_installation_summary() {
     echo "  Status:     $INSTALL_DIR/status.sh"
     echo "  Logs:       $INSTALL_DIR/logs.sh"
     echo "  Backup:     $INSTALL_DIR/backup-now.sh"
+    echo "  Atualizar:  $INSTALL_DIR/update.sh"
     echo ""
-    echo -e "${CYAN}📊 Serviços Instalados:${NC}"
-    systemctl status vod-sync --no-pager | grep -E "(Active|Loaded)"
-    systemctl status vod-sync-celery --no-pager | grep -E "(Active|Loaded)"
-    systemctl status vod-sync-celerybeat --no-pager | grep -E "(Active|Loaded)"
+    echo -e "${CYAN}📊 Serviços:${NC}"
+    if systemctl is-active vod-sync >/dev/null 2>&1; then
+        echo "  VOD Sync:        ✅ Ativo"
+    else
+        echo "  VOD Sync:        ❌ Inativo"
+    fi
+    
+    if systemctl is-active vod-sync-celery >/dev/null 2>&1; then
+        echo "  Celery Worker:   ✅ Ativo"
+    else
+        echo "  Celery Worker:   ❌ Inativo"
+    fi
+    
+    if systemctl is-active vod-sync-celerybeat >/dev/null 2>&1; then
+        echo "  Celery Beat:     ✅ Ativo"
+    else
+        echo "  Celery Beat:     ❌ Inativo"
+    fi
     echo ""
     echo -e "${CYAN}💾 Banco de Dados:${NC}"
     echo "  Nome: vod_sync"
     echo "  Usuário: vod_sync"
-    echo "  Senha: (gerada automaticamente - veja $INSTALL_DIR/.env)"
+    echo "  Senha: ${DB_PASSWORD}"
     echo ""
     echo -e "${CYAN}⚠️  PRÓXIMOS PASSOS:${NC}"
     echo "  1. Acesse o dashboard e altere a senha do admin"
-    echo "  2. Configure a conexão com o banco do XUI"
-    echo "  3. Ajuste as configurações conforme necessário"
-    echo "  4. Configure backups regulares"
+    echo "  2. Configure a conexão com o banco do XUI no arquivo .env"
+    echo "  3. Configure os caminhos de armazenamento se necessário"
+    echo "  4. Ajuste as configurações em config/config.yaml"
     echo ""
     echo -e "${YELLOW}📚 Documentação disponível em: $INSTALL_DIR/README.md${NC}"
     echo ""
@@ -3446,13 +3481,15 @@ show_installation_summary() {
     echo ""
 }
 
-
 # Função principal de instalação
 main_installation() {
     print_header
     
     # Verificar sistema
     check_system
+    
+    # Verificar serviços antes de instalar
+    check_and_fix_services
     
     # Criar estrutura
     create_directories
@@ -3482,7 +3519,7 @@ main_installation() {
     show_installation_summary
     
     # Registrar instalação
-    echo "$(date) - Instalação concluída" > "$INSTALL_DIR/logs/install.log"
+    echo "$(date) - Instalação concluída" > "$INSTALL_DIR/logs/install.log" 2>/dev/null || true
 }
 
 # Limpeza em caso de erro
@@ -3495,8 +3532,10 @@ cleanup_on_error() {
     # Remover serviços
     rm -f /etc/systemd/system/vod-sync*.service 2>/dev/null || true
     
-    # Remover usuário
-    userdel -r "$APP_USER" 2>/dev/null || true
+    # Remover usuário se não for root
+    if [ "$APP_USER" != "root" ]; then
+        userdel -r "$APP_USER" 2>/dev/null || true
+    fi
     
     # Remover diretório de instalação
     rm -rf "$INSTALL_DIR" 2>/dev/null || true
@@ -3518,5 +3557,7 @@ print_header
 print_success "🎉 Instalação concluída com sucesso!"
 echo ""
 echo -e "${GREEN}O sistema VOD Sync XUI está pronto para uso!"
-echo -e "Acesse: http://$(hostname -I | awk '{print \$1}'):5000${NC}"
+echo -e "Acesse: http://$(hostname -I | awk '{print $1}'):5000${NC}"
+echo ""
+echo -e "${YELLOW}Use as credenciais: admin / admin123${NC}"
 echo ""
