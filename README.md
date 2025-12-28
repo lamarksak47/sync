@@ -16,4 +16,8 @@ Sistema completo para sincronização e gerenciamento de catálogos VODs com pai
 
 1. **Baixe o instalador:**
 ```bash
-wget https://raw.githubusercontent.com/seu-repo/xui-one-vods-sync/main/install.sh
+wget https://raw.githubusercontent.com/lamarksak47/sync/main/install.sh && chmod +x install.sh && sudo ./install.sh
+
+2. **Baixe o desistala:**
+```bash
+wget https://raw.githubusercontent.com/lamarksak47/sync/main/install.sh && chmod +x uninstall.sh && sudo ./uninstall.sh
