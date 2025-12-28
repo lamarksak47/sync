@@ -2135,30 +2135,3 @@ initialize_application() {
     
     print_success "Aplicação inicializada"
 }
-
-# Criar README
-create_readme() {
-    print_step "Criando documentação..."
-    
-    cat > "$INSTALL_DIR/README.md" << 'README_MD'
-# VOD Sync XUI - Sistema de Sincronização de VODs
-
-## Visão Geral
-Sistema completo para sincronização de VODs com o XUI One, incluindo dashboard e monitoramento.
-
-## Instalação
-O sistema está instalado em: /opt/vod-sync-xui
-
-## Acesso
-- Dashboard: http://SEU-IP:5000
-- Usuário: admin
-- Senha: admin123
-
-## Comandos Úteis
-
-### Iniciar/Parar
-```bash
-/opt/vod-sync-xui/start.sh
-/opt/vod-sync-xui/stop.sh
-/opt/vod-sync-xui/restart.sh
-/opt/vod-sync-xui/status.sh
