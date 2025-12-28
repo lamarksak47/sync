@@ -384,7 +384,7 @@ bcrypt==4.1.2
 passlib==1.7.4
 
 # Data Processing
-pandas==2.1.3
+pandas==2.0.3
 numpy==1.26.2
 
 # Testing
