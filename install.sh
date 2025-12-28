@@ -347,7 +347,7 @@ redis==5.0.0
 Flask-RESTful==0.3.10
 Flask-CORS==4.0.0
 Flask-JWT-Extended==4.5.3
-Flask-Limiter==3.3.3
+Flask-Limiter==3.8.0
 Flask-SocketIO==5.3.6
 python-socketio==5.10.0
 eventlet==0.35.1
