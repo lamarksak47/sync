@@ -3446,15 +3446,13 @@ show_installation_summary() {
     echo ""
 }
 
+
 # Função principal de instalação
 main_installation() {
     print_header
     
     # Verificar sistema
     check_system
-    
-    # Verificar serviços antes de instalar
-    check_and_fix_services
     
     # Criar estrutura
     create_directories
