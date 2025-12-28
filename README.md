@@ -18,6 +18,6 @@ Sistema completo para sincronização e gerenciamento de catálogos VODs com pai
 ```bash
 wget https://raw.githubusercontent.com/lamarksak47/sync/main/install.sh && chmod +x install.sh && sudo ./install.sh
 
-2. **Baixe o desistala:**
+2. **Baixe o desistalador:**
 ```bash
-wget https://raw.githubusercontent.com/lamarksak47/sync/main/install.sh && chmod +x uninstall.sh && sudo ./uninstall.sh
+wget https://raw.githubusercontent.com/lamarksak47/sync/main/uninstall.sh && chmod +x uninstall.sh && sudo ./uninstall.sh
