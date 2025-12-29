@@ -1,880 +1,1385 @@
-#!/bin/bash
-# install_vod_sync_universal.sh - Instalador Universal para qualquer PHP
+#!/usr/bin/env bash
+set -euo pipefail
 
-# ============================================
-# CONFIGURAÇÕES
-# ============================================
-APP_NAME="vod-sync-xui"
-INSTALL_DIR="/opt/$APP_NAME"
-BACKEND_DIR="$INSTALL_DIR/backend"
-FRONTEND_DIR="$INSTALL_DIR/frontend"
-DB_NAME="vod_sync_system"
-DB_USER="vod_sync_user"
-DB_PASS=$(openssl rand -base64 32)
-PYTHON_VENV="$INSTALL_DIR/venv"
-LOG_FILE="/var/log/$APP_NAME-install.log"
-DOMAIN="${1:-}"
+#############################################
+# Sincronizador VOD (Premium Core - Legal-Safe)
+# Ubuntu 20.04 - One-file installer
+#############################################
 
-# Cores
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# ====== CONFIGURE AQUI (OBRIGATÓRIO) ======
+APP_DIR="/opt/vodsync"
+APP_USER="vodsync"
+APP_GROUP="vodsync"
 
-# Variáveis detectadas
-PHP_VERSION=""
-PHP_FPM_SERVICE=""
+MYSQL_DB="vodsync"
+MYSQL_USER="vodsync"
+MYSQL_PASS="SENHA_FORTE_AQUI"          # <-- TROQUE
+TMDB_API_KEY="SUA_CHAVE_TMDB"          # <-- TROQUE
+JWT_SECRET="TROQUE_POR_UMA_CHAVE_FORTE" # <-- TROQUE
 
-# ============================================
-# FUNÇÕES UTILITÁRIAS
-# ============================================
+# Admin seed (troque depois)
+ADMIN_EMAIL="admin@local"
+ADMIN_PASS="Admin@123"
 
-log() {
-    echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1" | tee -a "$LOG_FILE"
+# Nginx
+SERVER_NAME="_" # Pode colocar domínio: example.com  (ou "_" pra aceitar IP)
+
+# Backend
+BACKEND_HOST="127.0.0.1"
+BACKEND_PORT="8000"
+
+# ====== FUNÇÕES ======
+log(){ echo -e "\033[1;32m[OK]\033[0m $*"; }
+warn(){ echo -e "\033[1;33m[WARN]\033[0m $*"; }
+die(){ echo -e "\033[1;31m[ERRO]\033[0m $*"; exit 1; }
+
+need_root(){
+  if [[ "${EUID}" -ne 0 ]]; then
+    die "Rode como root: sudo bash install_vodsync.sh"
+  fi
 }
 
-success() {
-    echo -e "${GREEN}✓${NC} $1" | tee -a "$LOG_FILE"
+ensure_user(){
+  if ! id -u "${APP_USER}" >/dev/null 2>&1; then
+    useradd -r -m -d "${APP_DIR}" -s /usr/sbin/nologin "${APP_USER}"
+    log "Usuário ${APP_USER} criado"
+  else
+    log "Usuário ${APP_USER} já existe"
+  fi
 }
 
-error() {
-    echo -e "${RED}✗${NC} $1" | tee -a "$LOG_FILE"
-    exit 1
+apt_install(){
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+  apt-get install -y \
+    python3 python3-venv python3-pip build-essential \
+    mysql-server \
+    nginx \
+    php-fpm php-cli php-curl php-mbstring php-xml unzip curl
+  log "Pacotes instalados"
 }
 
-warning() {
-    echo -e "${YELLOW}!${NC} $1" | tee -a "$LOG_FILE"
-}
+mysql_setup(){
+  systemctl enable --now mysql
 
-check_root() {
-    [[ $EUID -ne 0 ]] && error "Execute como root: sudo $0"
-}
-
-detect_system() {
-    log "Detectando sistema..."
-    
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        OS=$ID
-        VERSION=$VERSION_ID
-    elif [[ -f /etc/debian_version ]]; then
-        OS="debian"
-        VERSION=$(cat /etc/debian_version)
-    else
-        error "Sistema não suportado"
-    fi
-    
-    success "Sistema: $OS $VERSION"
-}
-
-remove_apache() {
-    log "Removendo Apache para evitar conflitos..."
-    
-    # Parar e desabilitar Apache
-    systemctl stop apache2 2>/dev/null
-    systemctl disable apache2 2>/dev/null
-    
-    # Remover se existir
-    if dpkg -l | grep -q apache2; then
-        apt-get remove --purge apache2 apache2-utils libapache2-mod-php* -y
-        apt-get autoremove -y
-        success "Apache removido"
-    fi
-    
-    # Matar processos Apache pendentes
-    pkill -9 apache2 2>/dev/null || true
-}
-
-install_dependencies() {
-    log "Instalando dependências..."
-    
-    # Atualizar sistema
-    apt-get update || error "Falha ao atualizar"
-    
-    # Remover Apache primeiro
-    remove_apache
-    
-    # Dependências básicas
-    log "Instalando dependências básicas..."
-    BASIC_DEPS="curl wget git build-essential software-properties-common apt-transport-https ca-certificates gnupg lsb-release"
-    apt-get install -y $BASIC_DEPS || error "Falha em dependências básicas"
-    
-    # Python
-    log "Instalando Python 3..."
-    apt-get install -y python3 python3-pip python3-venv python3-dev || error "Falha ao instalar Python"
-    
-    # MySQL
-    log "Instalando MySQL..."
-    apt-get install -y mysql-server mysql-client libmysqlclient-dev || error "Falha ao instalar MySQL"
-    
-    # Nginx
-    log "Instalando Nginx..."
-    apt-get install -y nginx || error "Falha ao instalar Nginx"
-    
-    # Supervisor
-    log "Instalando Supervisor..."
-    apt-get install -y supervisor || error "Falha ao instalar Supervisor"
-    
-    success "Dependências básicas instaladas"
-}
-
-detect_and_install_php() {
-    log "Detectando e instalando PHP..."
-    
-    # Tentar versões específicas
-    PHP_VERSIONS=("8.1" "8.0" "7.4" "7.3" "7.2" "php")
-    
-    for version in "${PHP_VERSIONS[@]}"; do
-        log "Tentando PHP $version..."
-        
-        if [[ "$version" == "php" ]]; then
-            # Última tentativa: php genérico
-            PHP_PACKAGES="php php-cli php-fpm php-mysql php-curl php-gd php-mbstring php-xml php-zip php-bcmath"
-        else
-            # Versão específica
-            PHP_PACKAGES="php$version php$version-cli php$version-fpm php$version-mysql php$version-curl php$version-gd php$version-mbstring php$version-xml php$version-zip php$version-bcmath"
-        fi
-        
-        if apt-get install -y $PHP_PACKAGES 2>> "$LOG_FILE"; then
-            PHP_VERSION="$version"
-            
-            if [[ "$version" == "php" ]]; then
-                PHP_VERSION=$(php -v | head -n1 | cut -d' ' -f2 | cut -d'.' -f1-2)
-                PHP_FPM_SERVICE="php-fpm"
-            else
-                PHP_FPM_SERVICE="php$version-fpm"
-            fi
-            
-            success "PHP $PHP_VERSION instalado com sucesso!"
-            
-            # Verificar instalação
-            if php -v >> "$LOG_FILE" 2>&1; then
-                success "PHP funcionando: $(php -v | head -n1)"
-            fi
-            
-            return 0
-        else
-            warning "PHP $version falhou"
-        fi
-    done
-    
-    error "Não foi possível instalar nenhuma versão do PHP"
-}
-
-configure_php_fpm() {
-    log "Configurando PHP-FPM..."
-    
-    # Determinar caminho do socket PHP-FPM
-    if [[ "$PHP_VERSION" == "8.1" ]]; then
-        PHP_FPM_SOCKET="/var/run/php/php8.1-fpm.sock"
-        PHP_FPM_CONF="/etc/php/8.1/fpm/pool.d/www.conf"
-    elif [[ "$PHP_VERSION" == "8.0" ]]; then
-        PHP_FPM_SOCKET="/var/run/php/php8.0-fpm.sock"
-        PHP_FPM_CONF="/etc/php/8.0/fpm/pool.d/www.conf"
-    elif [[ "$PHP_VERSION" == "7.4" ]]; then
-        PHP_FPM_SOCKET="/var/run/php/php7.4-fpm.sock"
-        PHP_FPM_CONF="/etc/php/7.4/fpm/pool.d/www.conf"
-    elif [[ "$PHP_VERSION" == "7.3" ]]; then
-        PHP_FPM_SOCKET="/var/run/php/php7.3-fpm.sock"
-        PHP_FPM_CONF="/etc/php/7.3/fpm/pool.d/www.conf"
-    else
-        # Tentativa genérica
-        PHP_FPM_SOCKET="/var/run/php/php-fpm.sock"
-        PHP_FPM_CONF=$(find /etc/php -name "www.conf" | head -1)
-    fi
-    
-    # Verificar se arquivo existe
-    if [[ ! -f "$PHP_FPM_CONF" ]]; then
-        warning "Arquivo PHP-FPM não encontrado: $PHP_FPM_CONF"
-        PHP_FPM_CONF=$(find /etc/php -name "www.conf" | head -1)
-    fi
-    
-    if [[ -f "$PHP_FPM_CONF" ]]; then
-        # Backup
-        cp "$PHP_FPM_CONF" "${PHP_FPM_CONF}.backup"
-        
-        # Configurar socket
-        sed -i "s|^listen = .*|listen = $PHP_FPM_SOCKET|" "$PHP_FPM_CONF"
-        
-        # Configurar permissões
-        sed -i 's/^;listen.owner = www-data/listen.owner = www-data/' "$PHP_FPM_CONF"
-        sed -i 's/^;listen.group = www-data/listen.group = www-data/' "$PHP_FPM_CONF"
-        sed -i 's/^;listen.mode = 0660/listen.mode = 0660/' "$PHP_FPM_CONF"
-        
-        # Otimizar
-        sed -i 's/^pm.max_children = .*/pm.max_children = 50/' "$PHP_FPM_CONF"
-        sed -i 's/^pm.start_servers = .*/pm.start_servers = 5/' "$PHP_FPM_CONF"
-        sed -i 's/^pm.min_spare_servers = .*/pm.min_spare_servers = 5/' "$PHP_FPM_CONF"
-        sed -i 's/^pm.max_spare_servers = .*/pm.max_spare_servers = 10/' "$PHP_FPM_CONF"
-        
-        success "PHP-FPM configurado em: $PHP_FPM_CONF"
-    else
-        warning "Não foi possível encontrar configuração PHP-FPM"
-        PHP_FPM_SOCKET="/var/run/php/php-fpm.sock"
-    fi
-    
-    # Reiniciar PHP-FPM
-    systemctl restart "$PHP_FPM_SERVICE" 2>/dev/null || systemctl restart php-fpm 2>/dev/null
-    
-    # Verificar socket
-    sleep 2
-    if [[ -S "$PHP_FPM_SOCKET" ]]; then
-        success "Socket PHP-FPM criado: $PHP_FPM_SOCKET"
-    else
-        warning "Socket PHP-FPM não criado. Usando TCP."
-        PHP_FPM_SOCKET="127.0.0.1:9000"
-    fi
-    
-    # Exportar para uso no Nginx
-    export PHP_FPM_SOCKET
-}
-
-setup_database() {
-    log "Configurando banco de dados..."
-    
-    # Iniciar MySQL
-    systemctl start mysql 2>/dev/null || systemctl start mariadb 2>/dev/null
-    systemctl enable mysql 2>/dev/null || systemctl enable mariadb 2>/dev/null
-    
-    # Criar banco e usuário
-    SQL_FILE=$(mktemp)
-    cat > "$SQL_FILE" << EOF
--- Criar banco
-CREATE DATABASE IF NOT EXISTS \`$DB_NAME\`
-CHARACTER SET utf8mb4
-COLLATE utf8mb4_unicode_ci;
-
--- Criar usuário
-CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
-
--- Privilegios
-GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';
-
+  # Cria DB e usuário (idempotente)
+  mysql -uroot <<SQL
+CREATE DATABASE IF NOT EXISTS ${MYSQL_DB} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'localhost' IDENTIFIED BY '${MYSQL_PASS}';
+GRANT ALL PRIVILEGES ON ${MYSQL_DB}.* TO '${MYSQL_USER}'@'localhost';
 FLUSH PRIVILEGES;
+SQL
+  log "MySQL configurado (db: ${MYSQL_DB}, user: ${MYSQL_USER})"
+}
+
+write_file(){
+  local path="$1"
+  local content="$2"
+  mkdir -p "$(dirname "$path")"
+  printf "%s" "$content" > "$path"
+}
+
+create_project_tree(){
+  mkdir -p "${APP_DIR}"
+  chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}" || true
+
+  # ===== schema.sql =====
+  write_file "${APP_DIR}/schema.sql" "$(cat <<'EOF'
+CREATE TABLE users (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  parent_id INT NULL,
+  role ENUM('admin','reseller','user') NOT NULL DEFAULT 'user',
+  name VARCHAR(120) NOT NULL,
+  email VARCHAR(190) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  is_active TINYINT NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (parent_id) REFERENCES users(id)
+);
+
+CREATE TABLE licenses (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  owner_id INT NOT NULL,
+  `key` VARCHAR(64) NOT NULL UNIQUE,
+  plan VARCHAR(32) NOT NULL DEFAULT 'pro',
+  max_connections INT NOT NULL DEFAULT 1,
+  expires_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (owner_id) REFERENCES users(id)
+);
+
+CREATE TABLE external_connections (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  owner_id INT NOT NULL,
+  label VARCHAR(120) NOT NULL,
+  host VARCHAR(120) NOT NULL,
+  port INT NOT NULL DEFAULT 3306,
+  db_user VARCHAR(120) NOT NULL,
+  db_password VARCHAR(255) NOT NULL,
+  db_name VARCHAR(120) NOT NULL,
+  notes TEXT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (owner_id) REFERENCES users(id)
+);
+
+CREATE TABLE m3u_lists (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  owner_id INT NOT NULL,
+  raw_text MEDIUMTEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (owner_id) REFERENCES users(id)
+);
+
+CREATE TABLE parsed_items (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  owner_id INT NOT NULL,
+  content_type VARCHAR(16) NOT NULL,
+  category VARCHAR(120) NOT NULL,
+  title VARCHAR(255) NOT NULL,
+  source_url MEDIUMTEXT NOT NULL,
+  tmdb_id INT NULL,
+  year VARCHAR(8) NULL,
+  overview MEDIUMTEXT NULL,
+  poster_url MEDIUMTEXT NULL,
+  backdrop_url MEDIUMTEXT NULL,
+  genres MEDIUMTEXT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX(owner_id),
+  FOREIGN KEY (owner_id) REFERENCES users(id)
+);
+
+CREATE TABLE schedules (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  owner_id INT NOT NULL,
+  daily_time VARCHAR(5) NOT NULL DEFAULT '03:00',
+  enabled TINYINT NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (owner_id) REFERENCES users(id)
+);
+
+CREATE TABLE sync_logs (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  owner_id INT NOT NULL,
+  run_type VARCHAR(16) NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'running',
+  details MEDIUMTEXT NULL,
+  added INT NOT NULL DEFAULT 0,
+  updated INT NOT NULL DEFAULT 0,
+  errors INT NOT NULL DEFAULT 0,
+  started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  finished_at DATETIME NULL,
+  FOREIGN KEY (owner_id) REFERENCES users(id)
+);
 EOF
-    
-    mysql -u root < "$SQL_FILE" || error "Falha ao configurar banco"
-    rm -f "$SQL_FILE"
-    
-    success "Banco de dados criado: $DB_NAME"
-}
+)"
 
-setup_directories() {
-    log "Criando diretórios..."
-    
-    mkdir -p "$INSTALL_DIR"
-    mkdir -p "$BACKEND_DIR"
-    mkdir -p "$FRONTEND_DIR"
-    mkdir -p "$INSTALL_DIR/logs"
-    mkdir -p "$INSTALL_DIR/backups"
-    mkdir -p "$INSTALL_DIR/scripts"
-    mkdir -p "$FRONTEND_DIR/public/uploads"
-    mkdir -p "/var/log/$APP_NAME"
-    
-    # Permissões
-    chmod 755 "$INSTALL_DIR"
-    chmod 775 "$INSTALL_DIR/logs" "$INSTALL_DIR/backups"
-    chmod 777 "$FRONTEND_DIR/public/uploads"
-    
-    # Proprietário
-    chown -R www-data:www-data "$INSTALL_DIR" 2>/dev/null || true
-    
-    success "Diretórios criados"
-}
-
-setup_python_backend() {
-    log "Configurando backend Python..."
-    
-    # Ambiente virtual
-    python3 -m venv "$PYTHON_VENV" || error "Falha ao criar venv"
-    source "$PYTHON_VENV/bin/activate"
-    
-    # Criar requirements minimalista
-    cat > "$BACKEND_DIR/requirements.txt" << 'EOF'
-# Core
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-
-# Database
-sqlalchemy==2.0.23
-pymysql==1.1.0
-
-# Auth
-python-jose[cryptography]==3.3.0
+  # ===== BACKEND =====
+  write_file "${APP_DIR}/backend/requirements.txt" "$(cat <<'EOF'
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+SQLAlchemy==2.0.36
+pymysql==1.1.1
+python-dotenv==1.0.1
+requests==2.32.3
 passlib[bcrypt]==1.7.4
-python-dotenv==1.0.0
-
-# HTTP
-requests==2.31.0
-aiohttp==3.9.1
-
-# Utils
-pydantic==2.5.0
+python-jose==3.3.0
 apscheduler==3.10.4
-loguru==0.7.2
-
-# Production
-gunicorn==21.2.0
+pydantic==2.10.3
 EOF
-    
-    # Instalar dependências
-    pip install --upgrade pip
-    pip install -r "$BACKEND_DIR/requirements.txt"
-    
-    success "Backend Python configurado"
-}
+)"
 
-setup_frontend() {
-    log "Configurando frontend..."
-    
-    # Instalar Composer
-    if ! command -v composer &>/dev/null; then
-        curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-    fi
-    
-    # Estrutura básica do frontend
-    mkdir -p "$FRONTEND_DIR/app/Controllers"
-    mkdir -p "$FRONTEND_DIR/app/Views"
-    mkdir -p "$FRONTEND_DIR/public/assets"
-    
-    # Criar index.php simples
-    cat > "$FRONTEND_DIR/public/index.php" << 'EOF'
-<?php
-/**
- * VOD Sync XUI One - Painel Administrativo
- */
-session_start();
+  write_file "${APP_DIR}/backend/.env" "$(cat <<EOF
+APP_NAME=Sincronizador VOD
+JWT_SECRET=${JWT_SECRET}
+JWT_ALG=HS256
+JWT_EXPIRES_MIN=720
 
-// Configurações básicas
-define('APP_NAME', 'VOD Sync XUI One');
-define('APP_VERSION', '1.0.0');
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=${MYSQL_USER}
+MYSQL_PASSWORD=${MYSQL_PASS}
+MYSQL_DB=${MYSQL_DB}
 
-// Página inicial
-if (!isset($_SESSION['loggedin'])) {
-    // Página de login
-    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        // Login simples (em produção, use autenticação segura)
-        $username = $_POST['username'] ?? '';
-        $password = $_POST['password'] ?? '';
-        
-        if ($username === 'admin' && $password === 'admin123') {
-            $_SESSION['loggedin'] = true;
-            $_SESSION['username'] = $username;
-            header('Location: /dashboard');
-            exit;
+TMDB_API_KEY=${TMDB_API_KEY}
+TMDB_LANG=pt-BR
+
+SCHEDULER_ENABLED=true
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/main.py" "$(cat <<'EOF'
+from fastapi import FastAPI
+from app.routes import auth, users, licenses, connections, m3u, sync, dashboard
+from app.services.scheduler import scheduler_startup
+
+app = FastAPI(title="Sincronizador VOD (Legal-Safe Core)")
+
+app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+app.include_router(users.router, prefix="/api/users", tags=["users"])
+app.include_router(licenses.router, prefix="/api/licenses", tags=["licenses"])
+app.include_router(connections.router, prefix="/api/connections", tags=["connections"])
+app.include_router(m3u.router, prefix="/api/m3u", tags=["m3u"])
+app.include_router(sync.router, prefix="/api/sync", tags=["sync"])
+app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
+
+@app.on_event("startup")
+def on_startup():
+    scheduler_startup()
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/database/mysql.py" "$(cat <<'EOF'
+import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, DeclarativeBase
+from dotenv import load_dotenv
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD")
+MYSQL_DB = os.getenv("MYSQL_DB")
+
+DATABASE_URL = f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}?charset=utf8mb4"
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=3600)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+class Base(DeclarativeBase):
+    pass
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/models/base.py" "from app.database.mysql import Base\n"
+
+  write_file "${APP_DIR}/backend/app/models/user.py" "$(cat <<'EOF'
+from sqlalchemy import String, Integer, DateTime, Enum, ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from datetime import datetime
+import enum
+from app.models.base import Base
+
+class Role(str, enum.Enum):
+    ADMIN = "admin"
+    RESELLER = "reseller"
+    USER = "user"
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    parent_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    role: Mapped[str] = mapped_column(Enum(Role), nullable=False, default=Role.USER)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    email: Mapped[str] = mapped_column(String(190), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    parent = relationship("User", remote_side=[id])
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/models/license.py" "$(cat <<'EOF'
+from sqlalchemy import String, Integer, DateTime, ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from datetime import datetime
+from app.models.base import Base
+
+class License(Base):
+    __tablename__ = "licenses"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    plan: Mapped[str] = mapped_column(String(32), nullable=False, default="pro")
+    max_connections: Mapped[int] = mapped_column(Integer, default=1)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    owner = relationship("User")
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/models/connection.py" "$(cat <<'EOF'
+from sqlalchemy import String, Integer, DateTime, ForeignKey, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from datetime import datetime
+from app.models.base import Base
+
+class ExternalConnection(Base):
+    """
+    Conexão externa genérica (alvo). NÃO é conector XUI.
+    Você pode implementar depois um adapter legal para qualquer plataforma autorizada.
+    """
+    __tablename__ = "external_connections"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    label: Mapped[str] = mapped_column(String(120), nullable=False)
+
+    host: Mapped[str] = mapped_column(String(120), nullable=False)
+    port: Mapped[int] = mapped_column(Integer, nullable=False, default=3306)
+    db_user: Mapped[str] = mapped_column(String(120), nullable=False)
+    db_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    db_name: Mapped[str] = mapped_column(String(120), nullable=False)
+
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    owner = relationship("User")
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/models/m3u.py" "$(cat <<'EOF'
+from sqlalchemy import Integer, DateTime, ForeignKey, Text, String
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from datetime import datetime
+from app.models.base import Base
+
+class M3UList(Base):
+    __tablename__ = "m3u_lists"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    raw_text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    owner = relationship("User")
+
+class ParsedItem(Base):
+    __tablename__ = "parsed_items"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+
+    content_type: Mapped[str] = mapped_column(String(16), nullable=False)  # movie|series|unknown
+    category: Mapped[str] = mapped_column(String(120), nullable=False, default="Sem categoria")
+
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+
+    tmdb_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    year: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    overview: Mapped[str | None] = mapped_column(Text, nullable=True)
+    poster_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    backdrop_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    genres: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    owner = relationship("User")
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/models/schedule.py" "$(cat <<'EOF'
+from sqlalchemy import Integer, DateTime, ForeignKey, String
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from datetime import datetime
+from app.models.base import Base
+
+class Schedule(Base):
+    __tablename__ = "schedules"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    daily_time: Mapped[str] = mapped_column(String(5), nullable=False, default="03:00")  # HH:MM
+    enabled: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    owner = relationship("User")
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/models/sync_log.py" "$(cat <<'EOF'
+from sqlalchemy import Integer, DateTime, ForeignKey, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from datetime import datetime
+from app.models.base import Base
+
+class SyncLog(Base):
+    __tablename__ = "sync_logs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+
+    run_type: Mapped[str] = mapped_column(String(16), nullable=False)  # manual|auto
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="running")
+    details: Mapped[str] = mapped_column(Text, nullable=True)
+
+    added: Mapped[int] = mapped_column(Integer, default=0)
+    updated: Mapped[int] = mapped_column(Integer, default=0)
+    errors: Mapped[int] = mapped_column(Integer, default=0)
+
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    owner = relationship("User")
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/utils/security.py" "$(cat <<'EOF'
+from passlib.context import CryptContext
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def hash_password(p: str) -> str:
+    return pwd_context.hash(p)
+
+def verify_password(p: str, h: str) -> bool:
+    return pwd_context.verify(p, h)
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/utils/jwt.py" "$(cat <<'EOF'
+import os
+from datetime import datetime, timedelta
+from jose import jwt, JWTError
+from dotenv import load_dotenv
+
+load_dotenv()
+
+SECRET = os.getenv("JWT_SECRET", "change_me")
+ALG = os.getenv("JWT_ALG", "HS256")
+EXPIRES_MIN = int(os.getenv("JWT_EXPIRES_MIN", "720"))
+
+def create_token(payload: dict) -> str:
+    exp = datetime.utcnow() + timedelta(minutes=EXPIRES_MIN)
+    to_encode = {**payload, "exp": exp}
+    return jwt.encode(to_encode, SECRET, algorithm=ALG)
+
+def decode_token(token: str) -> dict:
+    return jwt.decode(token, SECRET, algorithms=[ALG])
+
+def safe_decode(token: str) -> dict | None:
+    try:
+        return decode_token(token)
+    except JWTError:
+        return None
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/controllers/deps.py" "$(cat <<'EOF'
+from fastapi import Depends, HTTPException, Header
+from sqlalchemy.orm import Session
+from app.database.mysql import get_db
+from app.utils.jwt import safe_decode
+from app.models.user import User, Role
+
+def get_current_user(
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None)
+) -> User:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Token ausente")
+    token = authorization.split(" ", 1)[1].strip()
+    data = safe_decode(token)
+    if not data or "user_id" not in data:
+        raise HTTPException(status_code=401, detail="Token inválido")
+    user = db.query(User).filter(User.id == int(data["user_id"]), User.is_active == 1).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Usuário não encontrado")
+    return user
+
+def require_role(*roles: Role):
+    def _guard(user: User = Depends(get_current_user)) -> User:
+        if user.role not in roles:
+            raise HTTPException(status_code=403, detail="Sem permissão")
+        return user
+    return _guard
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/services/m3u_parser.py" "$(cat <<'EOF'
+import re
+from typing import List, Dict
+
+EXTINF_RE = re.compile(r"#EXTINF:-?\d+\s*(.*)", re.IGNORECASE)
+
+def is_valid_m3u(text: str) -> bool:
+    return text.strip().startswith("#EXTM3U")
+
+def parse_m3u(text: str) -> List[Dict]:
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    items = []
+    current = None
+
+    for line in lines:
+        if line.startswith("#EXTINF"):
+            m = EXTINF_RE.match(line)
+            meta = m.group(1) if m else ""
+            group = "Sem categoria"
+            ctype = "unknown"
+
+            gt = re.search(r'group-title="([^"]+)"', meta)
+            if gt:
+                group = gt.group(1).strip()
+
+            tt = re.search(r'tvg-type="([^"]+)"', meta)
+            if tt:
+                t = tt.group(1).lower()
+                if "movie" in t:
+                    ctype = "movie"
+                elif "series" in t or "tv" in t:
+                    ctype = "series"
+
+            title = meta.split(",")[-1].strip() if "," in meta else "Sem título"
+            current = {"title": title, "category": group, "content_type": ctype}
+        elif line.startswith("#"):
+            continue
+        else:
+            if current:
+                current["source_url"] = line
+                items.append(current)
+                current = None
+
+    return items
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/services/tmdb_service.py" "$(cat <<'EOF'
+import os
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+TMDB_KEY = os.getenv("TMDB_API_KEY", "")
+TMDB_LANG = os.getenv("TMDB_LANG", "pt-BR")
+BASE = "https://api.themoviedb.org/3"
+IMG = "https://image.tmdb.org/t/p/original"
+
+class TMDbService:
+    def __init__(self):
+        if not TMDB_KEY:
+            raise RuntimeError("TMDB_API_KEY não configurada no .env")
+
+    def search(self, query: str, kind: str):
+        url = f"{BASE}/search/{kind}"
+        r = requests.get(url, params={"api_key": TMDB_KEY, "language": TMDB_LANG, "query": query}, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("results", [])
+
+    def enrich_movie(self, title: str):
+        res = self.search(title, "movie")
+        if not res:
+            return None
+        top = res[0]
+        return {
+            "tmdb_id": top.get("id"),
+            "overview": top.get("overview"),
+            "year": (top.get("release_date") or "")[:4],
+            "poster_url": IMG + top["poster_path"] if top.get("poster_path") else None,
+            "backdrop_url": IMG + top["backdrop_path"] if top.get("backdrop_path") else None,
+        }
+
+    def enrich_series(self, title: str):
+        res = self.search(title, "tv")
+        if not res:
+            return None
+        top = res[0]
+        return {
+            "tmdb_id": top.get("id"),
+            "overview": top.get("overview"),
+            "year": (top.get("first_air_date") or "")[:4],
+            "poster_url": IMG + top["poster_path"] if top.get("poster_path") else None,
+            "backdrop_url": IMG + top["backdrop_path"] if top.get("backdrop_path") else None,
+        }
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/services/scheduler.py" "$(cat <<'EOF'
+import os
+from apscheduler.schedulers.background import BackgroundScheduler
+from dotenv import load_dotenv
+
+load_dotenv()
+SCHEDULER_ENABLED = os.getenv("SCHEDULER_ENABLED", "true").lower() == "true"
+
+scheduler = BackgroundScheduler()
+
+def scheduler_startup():
+    if not SCHEDULER_ENABLED:
+        return
+    if not scheduler.running:
+        scheduler.start()
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/services/sync_core.py" "$(cat <<'EOF'
+from sqlalchemy.orm import Session
+from datetime import datetime
+from app.models.m3u import ParsedItem
+from app.models.sync_log import SyncLog
+from app.services.tmdb_service import TMDbService
+
+def run_sync(db: Session, owner_id: int, run_type: str = "manual", only_new: bool = False) -> SyncLog:
+    log = SyncLog(owner_id=owner_id, run_type=run_type, status="running", details="")
+    db.add(log)
+    db.commit()
+    db.refresh(log)
+
+    tmdb = TMDbService()
+    added = updated = errors = 0
+    notes = []
+
+    try:
+        items = db.query(ParsedItem).filter(ParsedItem.owner_id == owner_id).all()
+
+        for item in items:
+            if only_new and item.tmdb_id is not None:
+                continue
+
+            try:
+                if item.content_type == "movie":
+                    info = tmdb.enrich_movie(item.title)
+                elif item.content_type == "series":
+                    info = tmdb.enrich_series(item.title)
+                else:
+                    info = tmdb.enrich_movie(item.title) or tmdb.enrich_series(item.title)
+
+                if info:
+                    existed = item.tmdb_id is not None
+                    item.tmdb_id = info.get("tmdb_id")
+                    item.overview = info.get("overview")
+                    item.year = info.get("year")
+                    item.poster_url = info.get("poster_url")
+                    item.backdrop_url = info.get("backdrop_url")
+                    if existed:
+                        updated += 1
+                    else:
+                        added += 1
+
+                db.add(item)
+                db.commit()
+
+            except Exception as e:
+                errors += 1
+                notes.append(f"[ERRO] {item.title}: {str(e)}")
+                db.rollback()
+
+        log.status = "done"
+        log.added = added
+        log.updated = updated
+        log.errors = errors
+        log.details = "\n".join(notes)[:20000]
+        log.finished_at = datetime.utcnow()
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        return log
+
+    except Exception as e:
+        log.status = "failed"
+        log.details = f"Falha geral: {str(e)}"
+        log.finished_at = datetime.utcnow()
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        return log
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/routes/__init__.py" "# package\n"
+
+  write_file "${APP_DIR}/backend/app/routes/auth.py" "$(cat <<'EOF'
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from pydantic import BaseModel, EmailStr
+from app.database.mysql import get_db
+from app.models.user import User
+from app.utils.security import verify_password
+from app.utils.jwt import create_token
+
+router = APIRouter()
+
+class LoginIn(BaseModel):
+    email: EmailStr
+    password: str
+
+@router.post("/login")
+def login(payload: LoginIn, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == payload.email, User.is_active == 1).first()
+    if not user or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Credenciais inválidas")
+
+    token = create_token({"user_id": user.id, "role": user.role})
+    return {"token": token, "role": user.role, "name": user.name}
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/routes/m3u.py" "$(cat <<'EOF'
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from pydantic import BaseModel
+from app.database.mysql import get_db
+from app.controllers.deps import get_current_user
+from app.models.m3u import M3UList, ParsedItem
+from app.services.m3u_parser import is_valid_m3u, parse_m3u
+
+router = APIRouter()
+
+class M3UIn(BaseModel):
+    raw_text: str
+
+@router.post("/save")
+def save_m3u(payload: M3UIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if not is_valid_m3u(payload.raw_text):
+        raise HTTPException(status_code=400, detail="Formato M3U inválido (precisa iniciar com #EXTM3U)")
+    m = M3UList(owner_id=user.id, raw_text=payload.raw_text)
+    db.add(m)
+    db.commit()
+    return {"ok": True, "m3u_id": m.id}
+
+@router.post("/scan")
+def scan_m3u(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    last = db.query(M3UList).filter(M3UList.owner_id == user.id).order_by(M3UList.id.desc()).first()
+    if not last:
+        raise HTTPException(status_code=404, detail="Nenhuma lista M3U encontrada")
+
+    items = parse_m3u(last.raw_text)
+    db.query(ParsedItem).filter(ParsedItem.owner_id == user.id).delete()
+    db.commit()
+
+    for it in items:
+        db.add(ParsedItem(
+            owner_id=user.id,
+            content_type=it.get("content_type", "unknown"),
+            category=it.get("category", "Sem categoria"),
+            title=it.get("title", "Sem título"),
+            source_url=it.get("source_url", "")
+        ))
+    db.commit()
+
+    cats = sorted(list({i["category"] for i in items}))
+    return {"ok": True, "total": len(items), "categories": cats}
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/routes/sync.py" "$(cat <<'EOF'
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from app.database.mysql import get_db
+from app.controllers.deps import get_current_user
+from app.services.sync_core import run_sync
+
+router = APIRouter()
+
+@router.post("/manual")
+def manual_sync(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    log = run_sync(db, owner_id=user.id, run_type="manual", only_new=False)
+    return {"ok": True, "log": {"status": log.status, "added": log.added, "updated": log.updated, "errors": log.errors, "details": log.details}}
+
+@router.post("/auto")
+def auto_sync(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    log = run_sync(db, owner_id=user.id, run_type="auto", only_new=True)
+    return {"ok": True, "log": {"status": log.status, "added": log.added, "updated": log.updated, "errors": log.errors}}
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/routes/dashboard.py" "$(cat <<'EOF'
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from app.database.mysql import get_db
+from app.controllers.deps import get_current_user
+from app.models.sync_log import SyncLog
+
+router = APIRouter()
+
+@router.get("/")
+def dashboard(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    last = db.query(SyncLog).filter(SyncLog.owner_id == user.id).order_by(SyncLog.id.desc()).first()
+    return {
+        "ok": True,
+        "last_sync": None if not last else {
+            "status": last.status,
+            "run_type": last.run_type,
+            "added": last.added,
+            "updated": last.updated,
+            "errors": last.errors,
+            "started_at": str(last.started_at),
+            "finished_at": str(last.finished_at) if last.finished_at else None,
         }
     }
-    
-    // Exibir formulário de login
-    ?>
-    <!DOCTYPE html>
-    <html lang="pt-BR">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Login - <?php echo APP_NAME; ?></title>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-        <style>
-            body {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                height: 100vh;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-            }
-            .login-box {
-                background: white;
-                padding: 40px;
-                border-radius: 10px;
-                box-shadow: 0 10px 40px rgba(0,0,0,0.1);
-                width: 100%;
-                max-width: 400px;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="login-box">
-            <h2 class="text-center mb-4"><?php echo APP_NAME; ?></h2>
-            <form method="POST">
-                <div class="mb-3">
-                    <label class="form-label">Usuário</label>
-                    <input type="text" name="username" class="form-control" required>
-                </div>
-                <div class="mb-3">
-                    <label class="form-label">Senha</label>
-                    <input type="password" name="password" class="form-control" required>
-                </div>
-                <button type="submit" class="btn btn-primary w-100">Entrar</button>
-            </form>
-            <div class="text-center mt-3">
-                <small class="text-muted">Versão <?php echo APP_VERSION; ?></small>
-            </div>
-        </div>
-    </body>
-    </html>
-    <?php
-} else {
-    // Dashboard
-    ?>
-    <!DOCTYPE html>
-    <html lang="pt-BR">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Dashboard - <?php echo APP_NAME; ?></title>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.1/font/bootstrap-icons.css">
-    </head>
-    <body>
-        <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
-            <div class="container-fluid">
-                <a class="navbar-brand" href="#">
-                    <i class="bi bi-film"></i> <?php echo APP_NAME; ?>
-                </a>
-                <div class="navbar-nav ms-auto">
-                    <span class="navbar-text me-3">
-                        <i class="bi bi-person-circle"></i> <?php echo $_SESSION['username']; ?>
-                    </span>
-                    <a href="?logout=1" class="btn btn-outline-light btn-sm">
-                        <i class="bi bi-box-arrow-right"></i> Sair
-                    </a>
-                </div>
-            </div>
-        </nav>
-        
-        <div class="container-fluid mt-4">
-            <div class="row">
-                <!-- Sidebar -->
-                <div class="col-md-3 col-lg-2">
-                    <div class="list-group">
-                        <a href="#" class="list-group-item list-group-item-action active">
-                            <i class="bi bi-speedometer2"></i> Dashboard
-                        </a>
-                        <a href="#" class="list-group-item list-group-item-action">
-                            <i class="bi bi-server"></i> Configuração XUI
-                        </a>
-                        <a href="#" class="list-group-item list-group-item-action">
-                            <i class="bi bi-list-ul"></i> Listas M3U
-                        </a>
-                        <a href="#" class="list-group-item list-group-item-action">
-                            <i class="bi bi-arrow-repeat"></i> Sincronização
-                        </a>
-                        <a href="#" class="list-group-item list-group-item-action">
-                            <i class="bi bi-people"></i> Usuários
-                        </a>
-                        <a href="#" class="list-group-item list-group-item-action">
-                            <i class="bi bi-key"></i> Licenças
-                        </a>
-                    </div>
-                </div>
-                
-                <!-- Conteúdo -->
-                <div class="col-md-9 col-lg-10">
-                    <div class="row">
-                        <div class="col-12">
-                            <h2>Dashboard</h2>
-                            <p class="text-muted">Sistema de sincronização de conteúdos VOD</p>
-                        </div>
-                    </div>
-                    
-                    <!-- Cards de status -->
-                    <div class="row mt-4">
-                        <div class="col-md-3">
-                            <div class="card text-white bg-primary">
-                                <div class="card-body">
-                                    <h5 class="card-title"><i class="bi bi-check-circle"></i> Status</h5>
-                                    <p class="card-text">Sistema Online</p>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="card text-white bg-success">
-                                <div class="card-body">
-                                    <h5 class="card-title"><i class="bi bi-database"></i> Banco</h5>
-                                    <p class="card-text">Conectado</p>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="card text-white bg-info">
-                                <div class="card-body">
-                                    <h5 class="card-title"><i class="bi bi-cpu"></i> API</h5>
-                                    <p class="card-text">Rodando</p>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="card text-white bg-warning">
-                                <div class="card-body">
-                                    <h5 class="card-title"><i class="bi bi-clock-history"></i> Última Sync</h5>
-                                    <p class="card-text">Nunca</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- Ações rápidas -->
-                    <div class="row mt-4">
-                        <div class="col-12">
-                            <div class="card">
-                                <div class="card-header">
-                                    <h5>Ações Rápidas</h5>
-                                </div>
-                                <div class="card-body">
-                                    <div class="row">
-                                        <div class="col-md-3 mb-3">
-                                            <a href="#" class="btn btn-primary w-100">
-                                                <i class="bi bi-gear"></i> Configurar XUI
-                                            </a>
-                                        </div>
-                                        <div class="col-md-3 mb-3">
-                                            <a href="#" class="btn btn-success w-100">
-                                                <i class="bi bi-upload"></i> Upload M3U
-                                            </a>
-                                        </div>
-                                        <div class="col-md-3 mb-3">
-                                            <a href="#" class="btn btn-info w-100">
-                                                <i class="bi bi-arrow-repeat"></i> Sincronizar
-                                            </a>
-                                        </div>
-                                        <div class="col-md-3 mb-3">
-                                            <a href="#" class="btn btn-secondary w-100">
-                                                <i class="bi bi-file-text"></i> Ver Logs
-                                            </a>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <footer class="mt-5 py-3 bg-light text-center">
-            <div class="container">
-                <span class="text-muted">
-                    <?php echo APP_NAME; ?> v<?php echo APP_VERSION; ?> &copy; <?php echo date('Y'); ?>
-                </span>
-            </div>
-        </footer>
-        
-        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    </body>
-    </html>
-    <?php
-}
+EOF
+)"
 
-// Logout
-if (isset($_GET['logout'])) {
-    session_destroy();
-    header('Location: /');
+  write_file "${APP_DIR}/backend/app/routes/users.py" "$(cat <<'EOF'
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from pydantic import BaseModel, EmailStr
+from app.database.mysql import get_db
+from app.controllers.deps import require_role
+from app.models.user import User, Role
+from app.utils.security import hash_password
+
+router = APIRouter()
+
+class CreateUserIn(BaseModel):
+    name: str
+    email: EmailStr
+    password: str
+    role: Role
+    parent_id: int | None = None
+
+@router.post("/create")
+def create_user(payload: CreateUserIn, db: Session = Depends(get_db), me=Depends(require_role(Role.ADMIN, Role.RESELLER))):
+    if payload.role == Role.ADMIN and me.role != Role.ADMIN:
+        raise HTTPException(status_code=403, detail="Apenas admin cria admin")
+    if db.query(User).filter(User.email == payload.email).first():
+        raise HTTPException(status_code=400, detail="Email já existe")
+
+    parent_id = payload.parent_id
+    if me.role == Role.RESELLER:
+        parent_id = me.id
+        if payload.role == Role.ADMIN:
+            raise HTTPException(status_code=403, detail="Reseller não cria admin")
+
+    u = User(
+        name=payload.name,
+        email=payload.email,
+        password_hash=hash_password(payload.password),
+        role=payload.role,
+        parent_id=parent_id
+    )
+    db.add(u)
+    db.commit()
+    return {"ok": True, "user_id": u.id}
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/routes/licenses.py" "$(cat <<'EOF'
+import secrets
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from pydantic import BaseModel
+from app.database.mysql import get_db
+from app.controllers.deps import require_role
+from app.models.user import User, Role
+from app.models.license import License
+
+router = APIRouter()
+
+class CreateLicenseIn(BaseModel):
+    owner_id: int
+    plan: str = "pro"
+    max_connections: int = 1
+
+@router.post("/create")
+def create_license(payload: CreateLicenseIn, db: Session = Depends(get_db), me=Depends(require_role(Role.ADMIN))):
+    owner = db.query(User).filter(User.id == payload.owner_id).first()
+    if not owner:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    key = secrets.token_hex(16)
+    lic = License(owner_id=owner.id, key=key, plan=payload.plan, max_connections=payload.max_connections)
+    db.add(lic)
+    db.commit()
+    return {"ok": True, "license_key": key}
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/routes/connections.py" "$(cat <<'EOF'
+from fastapi import APIRouter
+from pydantic import BaseModel
+import pymysql
+
+router = APIRouter()
+
+class ConnIn(BaseModel):
+    label: str
+    host: str
+    port: int = 3306
+    db_user: str
+    db_password: str
+    db_name: str
+
+@router.post("/test")
+def test_conn(payload: ConnIn):
+    conn = pymysql.connect(
+        host=payload.host, port=payload.port,
+        user=payload.db_user, password=payload.db_password,
+        database=payload.db_name, connect_timeout=5
+    )
+    conn.close()
+    return {"ok": True}
+EOF
+)"
+
+  write_file "${APP_DIR}/backend/app/seed_admin.py" "$(cat <<EOF
+from app.database.mysql import SessionLocal
+from app.models.user import User, Role
+from app.utils.security import hash_password
+
+db = SessionLocal()
+exists = db.query(User).filter(User.email == "${ADMIN_EMAIL}").first()
+if not exists:
+    admin = User(name="Admin", email="${ADMIN_EMAIL}", password_hash=hash_password("${ADMIN_PASS}"), role=Role.ADMIN)
+    db.add(admin)
+    db.commit()
+    print("Admin criado: ${ADMIN_EMAIL} / ${ADMIN_PASS}")
+else:
+    print("Admin já existe: ${ADMIN_EMAIL}")
+EOF
+)"
+
+  # ===== FRONTEND (PHP) =====
+  write_file "${APP_DIR}/frontend/config/api.php" "$(cat <<'EOF'
+<?php
+// Chamamos o backend via localhost porque o PHP roda no mesmo servidor.
+// Nginx faz proxy /api -> FastAPI.
+return [
+  "API_BASE" => "http://127.0.0.1/api"
+];
+EOF
+)"
+
+  write_file "${APP_DIR}/frontend/public/login.php" "$(cat <<'EOF'
+<?php
+session_start();
+$cfg = require __DIR__ . "/../config/api.php";
+$msg = "";
+
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+  $email = $_POST["email"] ?? "";
+  $pass = $_POST["password"] ?? "";
+
+  $payload = json_encode(["email"=>$email, "password"=>$pass]);
+  $ch = curl_init($cfg["API_BASE"]."/auth/login");
+  curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_POST => true,
+    CURLOPT_HTTPHEADER => ["Content-Type: application/json"],
+    CURLOPT_POSTFIELDS => $payload,
+  ]);
+  $res = curl_exec($ch);
+  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  curl_close($ch);
+
+  if ($code === 200) {
+    $data = json_decode($res, true);
+    $_SESSION["token"] = $data["token"];
+    $_SESSION["name"] = $data["name"];
+    $_SESSION["role"] = $data["role"];
+    header("Location: index.php");
     exit;
+  } else {
+    $msg = "Login inválido";
+  }
 }
+?>
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Login</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+<div class="container py-5" style="max-width:420px;">
+  <div class="card shadow-sm">
+    <div class="card-body">
+      <h4 class="mb-3">Entrar</h4>
+      <?php if($msg): ?><div class="alert alert-danger"><?=$msg?></div><?php endif; ?>
+      <form method="post">
+        <div class="mb-3">
+          <label class="form-label">Email</label>
+          <input class="form-control" name="email" required>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Senha</label>
+          <input class="form-control" type="password" name="password" required>
+        </div>
+        <button class="btn btn-dark w-100">Entrar</button>
+      </form>
+    </div>
+  </div>
+</div>
+</body>
+</html>
 EOF
-    
-    success "Frontend configurado"
+)"
+
+  write_file "${APP_DIR}/frontend/public/index.php" "$(cat <<'EOF'
+<?php
+session_start();
+if (!isset($_SESSION["token"])) { header("Location: login.php"); exit; }
+$cfg = require __DIR__ . "/../config/api.php";
+
+function api_get($url, $token) {
+  $ch = curl_init($url);
+  curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => ["Authorization: Bearer ".$token],
+  ]);
+  $res = curl_exec($ch);
+  curl_close($ch);
+  return json_decode($res, true);
 }
 
-configure_nginx() {
-    log "Configurando Nginx..."
-    
-    # Parar Nginx
-    systemctl stop nginx 2>/dev/null
-    
-    # Configuração do site
-    NGINX_CONFIG="/etc/nginx/sites-available/$APP_NAME"
-    
-    cat > "$NGINX_CONFIG" << EOF
+$data = api_get($cfg["API_BASE"]."/dashboard/", $_SESSION["token"]);
+$last = $data["last_sync"] ?? null;
+?>
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Painel</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+<nav class="navbar navbar-dark bg-dark">
+  <div class="container">
+    <span class="navbar-brand">Sincronizador VOD</span>
+    <span class="text-white">Olá, <?=$_SESSION["name"]?> (<?=$_SESSION["role"]?>)</span>
+  </div>
+</nav>
+
+<div class="container py-4">
+  <div class="row g-3">
+    <div class="col-md-6">
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <h5>Última sincronização</h5>
+          <?php if(!$last): ?>
+            <p class="text-muted">Nenhuma ainda.</p>
+          <?php else: ?>
+            <ul class="mb-0">
+              <li>Status: <?=$last["status"]?></li>
+              <li>Tipo: <?=$last["run_type"]?></li>
+              <li>Adicionados: <?=$last["added"]?></li>
+              <li>Atualizados: <?=$last["updated"]?></li>
+              <li>Erros: <?=$last["errors"]?></li>
+            </ul>
+          <?php endif; ?>
+          <hr>
+          <a class="btn btn-outline-dark me-2" href="m3u.php">Lista M3U</a>
+          <a class="btn btn-dark" href="sync.php">Sincronizar</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
+EOF
+)"
+
+  write_file "${APP_DIR}/frontend/public/m3u.php" "$(cat <<'EOF'
+<?php
+session_start();
+if (!isset($_SESSION["token"])) { header("Location: login.php"); exit; }
+$cfg = require __DIR__ . "/../config/api.php";
+$msg = "";
+
+function api_post($url, $token, $body) {
+  $ch = curl_init($url);
+  curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_POST => true,
+    CURLOPT_HTTPHEADER => ["Authorization: Bearer ".$token, "Content-Type: application/json"],
+    CURLOPT_POSTFIELDS => json_encode($body),
+  ]);
+  $res = curl_exec($ch);
+  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  curl_close($ch);
+  return [$code, json_decode($res, true)];
+}
+
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+  $raw = $_POST["raw"] ?? "";
+  [$code, $res] = api_post($cfg["API_BASE"]."/m3u/save", $_SESSION["token"], ["raw_text"=>$raw]);
+  $msg = ($code===200) ? "Lista salva com sucesso." : ("Erro: ".($res["detail"] ?? "falha"));
+}
+?>
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>M3U</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+<div class="container py-4">
+  <a href="index.php" class="btn btn-link">&larr; Voltar</a>
+  <div class="card shadow-sm">
+    <div class="card-body">
+      <h5>Inserir lista M3U</h5>
+      <?php if($msg): ?><div class="alert alert-info"><?=$msg?></div><?php endif; ?>
+      <form method="post">
+        <textarea class="form-control" rows="12" name="raw" placeholder="#EXTM3U ..." required></textarea>
+        <button class="btn btn-dark mt-3">Salvar</button>
+      </form>
+      <hr>
+      <form method="post" action="scan.php">
+        <button class="btn btn-outline-dark">Escanear Lista</button>
+      </form>
+    </div>
+  </div>
+</div>
+</body>
+</html>
+EOF
+)"
+
+  write_file "${APP_DIR}/frontend/public/scan.php" "$(cat <<'EOF'
+<?php
+session_start();
+if (!isset($_SESSION["token"])) { header("Location: login.php"); exit; }
+$cfg = require __DIR__ . "/../config/api.php";
+
+$ch = curl_init($cfg["API_BASE"]."/m3u/scan");
+curl_setopt_array($ch, [
+  CURLOPT_RETURNTRANSFER => true,
+  CURLOPT_POST => true,
+  CURLOPT_HTTPHEADER => ["Authorization: Bearer ".$_SESSION["token"]],
+]);
+$res = curl_exec($ch);
+$code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+
+$data = json_decode($res, true);
+?>
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Scan</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+<div class="container py-4">
+  <a href="m3u.php" class="btn btn-link">&larr; Voltar</a>
+  <div class="card shadow-sm">
+    <div class="card-body">
+      <h5>Resultado do Scanner</h5>
+      <?php if($code!==200): ?>
+        <div class="alert alert-danger">Erro: <?=$data["detail"] ?? "falha"?></div>
+      <?php else: ?>
+        <div class="alert alert-success">Itens: <?=$data["total"]?></div>
+        <p class="mb-1"><b>Categorias encontradas:</b></p>
+        <ul>
+          <?php foreach($data["categories"] as $c): ?>
+            <li><?=htmlspecialchars($c)?></li>
+          <?php endforeach; ?>
+        </ul>
+      <?php endif; ?>
+    </div>
+  </div>
+</div>
+</body>
+</html>
+EOF
+)"
+
+  write_file "${APP_DIR}/frontend/public/sync.php" "$(cat <<'EOF'
+<?php
+session_start();
+if (!isset($_SESSION["token"])) { header("Location: login.php"); exit; }
+$cfg = require __DIR__ . "/../config/api.php";
+$msg = "";
+$log = null;
+
+function api_post($url, $token) {
+  $ch = curl_init($url);
+  curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_POST => true,
+    CURLOPT_HTTPHEADER => ["Authorization: Bearer ".$token],
+  ]);
+  $res = curl_exec($ch);
+  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  curl_close($ch);
+  return [$code, json_decode($res, true)];
+}
+
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+  [$code, $res] = api_post($cfg["API_BASE"]."/sync/manual", $_SESSION["token"]);
+  if ($code===200) {
+    $msg = "Sincronização concluída.";
+    $log = $res["log"];
+  } else {
+    $msg = "Falha ao sincronizar.";
+  }
+}
+?>
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Sincronizar</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+<div class="container py-4">
+  <a href="index.php" class="btn btn-link">&larr; Voltar</a>
+  <div class="card shadow-sm">
+    <div class="card-body">
+      <h5>Sincronização Manual</h5>
+      <?php if($msg): ?><div class="alert alert-info"><?=$msg?></div><?php endif; ?>
+      <form method="post">
+        <button class="btn btn-dark">Executar</button>
+      </form>
+
+      <?php if($log): ?>
+        <hr>
+        <h6>Resumo</h6>
+        <ul>
+          <li>Status: <?=$log["status"]?></li>
+          <li>Adicionados: <?=$log["added"]?></li>
+          <li>Atualizados: <?=$log["updated"]?></li>
+          <li>Erros: <?=$log["errors"]?></li>
+        </ul>
+        <?php if(!empty($log["details"])): ?>
+          <pre style="white-space:pre-wrap;"><?=$log["details"]?></pre>
+        <?php endif; ?>
+      <?php endif; ?>
+    </div>
+  </div>
+</div>
+</body>
+</html>
+EOF
+)"
+
+  log "Arquivos do projeto criados em ${APP_DIR}"
+}
+
+import_schema(){
+  mysql -u"${MYSQL_USER}" -p"${MYSQL_PASS}" "${MYSQL_DB}" < "${APP_DIR}/schema.sql" || true
+  log "schema.sql importado (se já existia, não quebrou)"
+}
+
+backend_setup(){
+  cd "${APP_DIR}/backend"
+
+  python3 -m venv venv
+  source venv/bin/activate
+  pip3 install --upgrade pip
+  pip3 install -r requirements.txt
+
+  # Seed admin
+  python -m app.seed_admin || true
+
+  deactivate
+  log "Backend preparado (venv + deps + seed admin)"
+}
+
+systemd_setup(){
+  cat > /etc/systemd/system/vodsync-backend.service <<EOF
+[Unit]
+Description=VODSync Backend (FastAPI)
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_GROUP}
+WorkingDirectory=${APP_DIR}/backend
+Environment=PYTHONUNBUFFERED=1
+ExecStart=${APP_DIR}/backend/venv/bin/uvicorn app.main:app --host ${BACKEND_HOST} --port ${BACKEND_PORT}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now vodsync-backend.service
+  log "systemd: vodsync-backend.service ativo"
+}
+
+nginx_setup(){
+  # PHP-FPM socket (Ubuntu 20 geralmente é php7.4-fpm)
+  PHP_SOCK="/run/php/php7.4-fpm.sock"
+  if [[ ! -S "${PHP_SOCK}" ]]; then
+    warn "Socket php7.4-fpm não encontrado em ${PHP_SOCK}. Tentando detectar..."
+    PHP_SOCK="$(ls /run/php/php*-fpm.sock 2>/dev/null | head -n 1 || true)"
+    [[ -n "${PHP_SOCK}" ]] || die "Não encontrei socket do php-fpm em /run/php/"
+  fi
+
+  mkdir -p /var/www/vodsync
+  rsync -a --delete "${APP_DIR}/frontend/public/" /var/www/vodsync/
+  chown -R www-data:www-data /var/www/vodsync
+
+  # Nginx server block
+  cat > /etc/nginx/sites-available/vodsync <<EOF
 server {
-    listen 80;
-    listen [::]:80;
-    
-    server_name ${DOMAIN:-_} localhost 127.0.0.1;
-    root $FRONTEND_DIR/public;
-    index index.php index.html;
-    
-    # Logs
-    access_log /var/log/nginx/${APP_NAME}_access.log;
-    error_log /var/log/nginx/${APP_NAME}_error.log;
-    
-    # Frontend
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
-    
-    # PHP-FPM
-    location ~ \\.php\$ {
-        try_files \$uri =404;
-        fastcgi_split_path_info ^(.+\\.php)(/.+)\$;
-        fastcgi_pass unix:$PHP_FPM_SOCKET;
-        fastcgi_index index.php;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        include fastcgi_params;
-        
-        fastcgi_connect_timeout 60s;
-        fastcgi_send_timeout 60s;
-        fastcgi_read_timeout 60s;
-    }
-    
-    # API Backend
-    location /api/ {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-    
-    # WebSocket
-    location /ws/ {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-    
-    # Static files
-    location ~* \\.(js|css|png|jpg|jpeg|gif|ico|svg)\$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-    
-    # Deny sensitive
-    location ~ /\. {
-        deny all;
-    }
-    
-    location ~ /(config|logs|backups) {
-        deny all;
-    }
+  listen 80;
+  server_name ${SERVER_NAME};
+
+  root /var/www/vodsync;
+  index index.php index.html;
+
+  # Painel
+  location / {
+    try_files \$uri \$uri/ /index.php?\$query_string;
+  }
+
+  # PHP
+  location ~ \.php$ {
+    include snippets/fastcgi-php.conf;
+    fastcgi_pass unix:${PHP_SOCK};
+  }
+
+  # API -> FastAPI
+  location /api/ {
+    proxy_pass http://${BACKEND_HOST}:${BACKEND_PORT}/api/;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+  }
 }
 EOF
-    
-    # Habilitar site
-    ln -sf "$NGINX_CONFIG" /etc/nginx/sites-enabled/
-    rm -f /etc/nginx/sites-enabled/default 2>/dev/null
-    
-    # Testar configuração
-    nginx -t || error "Configuração Nginx inválida"
-    
-    # Iniciar Nginx
-    systemctl start nginx
-    systemctl enable nginx
-    
-    success "Nginx configurado"
+
+  ln -sf /etc/nginx/sites-available/vodsync /etc/nginx/sites-enabled/vodsync
+  rm -f /etc/nginx/sites-enabled/default || true
+
+  nginx -t
+  systemctl enable --now nginx
+  systemctl reload nginx
+
+  log "Nginx configurado: / (painel PHP) e /api (backend)"
 }
 
-configure_supervisor() {
-    log "Configurando Supervisor..."
-    
-    # Configurar API
-    cat > /etc/supervisor/conf.d/$APP_NAME-api.conf << EOF
-[program:$APP_NAME-api]
-command=$PYTHON_VENV/bin/gunicorn app.main:app --workers 2 --worker-class uvicorn.workers.UvicornWorker --bind 127.0.0.1:8000 --log-level info
-directory=$BACKEND_DIR
-user=www-data
-autostart=true
-autorestart=true
-stdout_logfile=/var/log/$APP_NAME/api.log
-stderr_logfile=/var/log/$APP_NAME/api-error.log
-environment=PYTHONPATH="$BACKEND_DIR",PATH="$PYTHON_VENV/bin"
-EOF
-    
-    # Reiniciar supervisor
-    systemctl restart supervisor
-    supervisorctl update
-    
-    success "Supervisor configurado"
+final_info(){
+  local ip
+  ip="$(curl -s ifconfig.me || true)"
+  echo
+  echo "==============================================="
+  echo "INSTALAÇÃO CONCLUÍDA"
+  echo "==============================================="
+  echo "Painel:   http://${ip:-SEU_IP}/"
+  echo "API:      http://${ip:-SEU_IP}/api/"
+  echo
+  echo "Admin:    ${ADMIN_EMAIL} / ${ADMIN_PASS}"
+  echo
+  echo "Serviço:  systemctl status vodsync-backend.service"
+  echo "Logs:     journalctl -u vodsync-backend.service -f"
+  echo
+  echo "Nginx:    systemctl status nginx"
+  echo "==============================================="
+  echo
+  warn "Troque ADMIN_PASS e JWT_SECRET depois. Em produto premium isso é obrigatório."
 }
 
-create_backend_structure() {
-    log "Criando estrutura do backend..."
-    
-    # Criar app principal
-    mkdir -p "$BACKEND_DIR/app"
-    
-    # main.py
-    cat > "$BACKEND_DIR/app/main.py" << 'EOF'
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+#############################################
+# MAIN
+#############################################
+need_root
+apt_install
+ensure_user
+mysql_setup
+create_project_tree
 
-app = FastAPI(title="VOD Sync XUI One API")
+# Permissões
+chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}"
 
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.get("/")
-async def root():
-    return {"message": "VOD Sync XUI One API"}
-
-@app.get("/health")
-async def health():
-    return {"status": "healthy"}
-
-@app.get("/api/v1/test")
-async def test():
-    return {"test": "ok"}
-EOF
-    
-    # .env
-    cat > "$BACKEND_DIR/.env" << EOF
-# VOD Sync XUI One
-APP_NAME=VOD Sync XUI One
-APP_ENV=production
-APP_URL=http://${DOMAIN:-localhost}
-
-# Database
-DB_HOST=localhost
-DB_PORT=3306
-DB_NAME=$DB_NAME
-DB_USER=$DB_USER
-DB_PASS=$DB_PASS
-
-# TMDb (configure depois)
-TMDB_API_KEY=sua_chave_aqui
-TMDB_LANGUAGE=pt-BR
-
-# Security
-SECRET_KEY=$(openssl rand -hex 32)
-JWT_SECRET_KEY=$(openssl rand -hex 32)
-EOF
-    
-    success "Backend criado"
-}
-
-create_admin_user() {
-    log "Criando usuário administrador..."
-    
-    # Senha padrão
-    ADMIN_PASS="Admin@123"
-    
-    # Salvar credenciais
-    cat > "$INSTALL_DIR/credentials.txt" << EOF
-============================================
-VOD SYNC XUI ONE - CREDENCIAIS
-============================================
-
-URL: http://${DOMAIN:-seu-ip}
-Usuário: admin
-Senha: $ADMIN_PASS
-
-Banco: $DB_NAME
-Usuário DB: $DB_USER
-Senha DB: $DB_PASS
-
-PHP Version: $PHP_VERSION
-PHP-FPM Socket: $PHP_FPM_SOCKET
-
-============================================
-PRÓXIMOS PASSOS:
-1. Configure TMDb API em:
-   $BACKEND_DIR/.env
-
-2. Acesse o painel e configure:
-   - Conexão XUI One
-   - Listas M3U
-
-3. Para produção:
-   - Altere todas as senhas
-   - Configure SSL/TLS
-============================================
-EOF
-    
-    echo ""
-    echo "========================================================"
-    echo "         CREDENCIAIS DE ACESSO                          "
-    echo "========================================================"
-    echo "🌐 URL: http://${DOMAIN:-seu-ip}"
-    echo "👤 Usuário: admin"
-    echo "🔑 Senha: $ADMIN_PASS"
-    echo ""
-    echo "📁 Credenciais salvas em: $INSTALL_DIR/credentials.txt"
-    echo "========================================================"
-    
-    success "Credenciais criadas"
-}
-
-finalize() {
-    log "Finalizando instalação..."
-    
-    # Permissões
-    chown -R www-data:www-data "$INSTALL_DIR" 2>/dev/null || true
-    
-    # Reiniciar serviços
-    systemctl restart nginx
-    systemctl restart "$PHP_FPM_SERVICE" 2>/dev/null || systemctl restart php-fpm 2>/dev/null
-    systemctl restart supervisor
-    
-    # Testar
-    sleep 3
-    echo ""
-    echo "📊 Status dos serviços:"
-    echo "-----------------------"
-    systemctl status nginx --no-pager -l | head -10
-    echo ""
-    systemctl status "$PHP_FPM_SERVICE" --no-pager -l | head -10 2>/dev/null || true
-    
-    # URL final
-    echo ""
-    echo "🎉 Instalação concluída com sucesso!"
-    echo ""
-    echo "✅ Sistema instalado em: $INSTALL_DIR"
-    echo "✅ PHP Version: $PHP_VERSION"
-    echo "✅ Banco: $DB_NAME"
-    echo "✅ Nginx: http://${DOMAIN:-seu-ip}"
-    echo ""
-    echo "🔧 Próximos passos:"
-    echo "   1. Configure TMDb API em $BACKEND_DIR/.env"
-    echo "   2. Acesse o painel com as credenciais acima"
-    echo "   3. Configure sua conexão XUI One"
-    echo ""
-    echo "📞 Logs em: /var/log/$APP_NAME/"
-}
-
-main() {
-    clear
-    echo "========================================================"
-    echo "    VOD SYNC XUI ONE - INSTALADOR UNIVERSAL           "
-    echo "========================================================"
-    echo ""
-    
-    check_root
-    detect_system
-    
-    echo "📋 Sistema: $OS $VERSION"
-    echo "📁 Diretório: $INSTALL_DIR"
-    echo "🌐 Domínio: ${DOMAIN:-localhost}"
-    echo ""
-    
-    read -p "Continuar? (s/N): " -n 1 -r
-    echo ""
-    [[ ! $REPLY =~ ^[SsYy]$ ]] && error "Cancelado"
-    
-    # Executar passos
-    install_dependencies
-    detect_and_install_php
-    configure_php_fpm
-    setup_database
-    setup_directories
-    setup_python_backend
-    setup_frontend
-    create_backend_structure
-    configure_nginx
-    configure_supervisor
-    create_admin_user
-    finalize
-}
-
-main "$@"
+import_schema
+backend_setup
+systemd_setup
+nginx_setup
+final_info
