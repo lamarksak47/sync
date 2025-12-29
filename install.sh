@@ -304,7 +304,7 @@ create_backend_files() {
     "uuid": "9.0.1",
     "moment": "2.29.4",
     "socket.io": "4.7.4",
-    "m3u8-parser": "6.1.1",
+    "m3u8-parser": "6.0.0",
     "cheerio": "1.0.0-rc.12",
     "rate-limiter-flexible": "2.4.2"
   },
@@ -3452,7 +3452,7 @@ install_node_dependencies() {
     
     # Dependências de funcionalidades
     npm install socket.io@4.7.4
-    npm install m3u8-parser@6.1.1
+    npm install m3u8-parser@6.0.0
     npm install cheerio@1.0.0-rc.12
     npm install rate-limiter-flexible@2.4.2
     
