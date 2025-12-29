@@ -192,10 +192,13 @@ create_backend_files() {
     "helmet": "^7.0.0",
     "compression": "^1.7.4",
     "multer": "^1.4.5-lts.1",
-    "rate-limit-flexible": "^2.4.1",
+    "express-rate-limit": "^7.1.5",  # CORREÇÃO: Substituir rate-limit-flexible
     "uuid": "^9.0.1",
     "moment": "^2.29.4",
-    "socket.io": "^4.7.2"
+    "socket.io": "^4.7.2",
+    "m3u8-parser": "^6.1.0",  # Adicionar parser M3U8
+    "cheerio": "^1.0.0-rc.12",  # Para parsing HTML se necessário
+    "rate-limiter-flexible": "^2.4.2"  # Alternativa se quiser manter
   },
   "devDependencies": {
     "nodemon": "^3.0.1",
