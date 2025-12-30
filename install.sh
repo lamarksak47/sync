@@ -4,8 +4,6 @@
 # INSTALADOR VOD SYNC SYSTEM - PHP 7.4
 # ============================================
 
-# Removi set -e para evitar saída prematura
-
 # Cores
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -49,8 +47,7 @@ warning() {
 
 error() {
     echo -e "${RED}✗${NC} $1"
-    echo "🔍 Consulte o log completo: $LOG_FILE"
-    return 1  # Retorna erro mas não sai
+    return 1
 }
 
 # ==================== VERIFICAR ROOT ====================
@@ -60,208 +57,6 @@ check_root() {
         exit 1
     fi
     success "Privilégios root verificados"
-}
-
-# ==================== DETECTAR DISTRIBUIÇÃO ====================
-detect_distro() {
-    log "Detectando distribuição..."
-    
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        OS=$ID
-        VERSION=$VERSION_ID
-        echo "Distribuição: $OS $VERSION"
-    else
-        OS=$(uname -s)
-    fi
-    
-    case $OS in
-        ubuntu|debian)
-            DISTRO="debian"
-            ;;
-        centos|rhel|fedora|rocky|almalinux)
-            DISTRO="rhel"
-            ;;
-        *)
-            DISTRO="unknown"
-            ;;
-    esac
-    
-    success "Distribuição detectada: $DISTRO ($OS $VERSION)"
-    echo $DISTRO
-}
-
-# ==================== INSTALAR PHP 7.4 - VERSÃO CORRIGIDA ====================
-install_php_74() {
-    log "Instalando PHP 7.4 (método robusto)..."
-    
-    # Primeiro, verificar se já temos PHP instalado
-    if command -v php &> /dev/null; then
-        PHP_VERSION=$(php -v | head -1 | cut -d' ' -f2 | cut -d'.' -f1,2)
-        success "✅ PHP já instalado: versão $PHP_VERSION"
-        return 0
-    fi
-    
-    # Atualizar repositórios
-    apt-get update 2>> "$LOG_FILE"
-    
-    # Instalar dependências necessárias
-    log "Instalando dependências..."
-    if ! apt-get install -y software-properties-common apt-transport-https lsb-release ca-certificates wget 2>> "$LOG_FILE"; then
-        warning "Falha ao instalar algumas dependências, continuando..."
-    fi
-    
-    # Adicionar repositório ondrej/php para PHP 7.4
-    log "Adicionando repositório ondrej/php..."
-    if ! add-apt-repository -y ppa:ondrej/php 2>> "$LOG_FILE"; then
-        warning "Não foi possível adicionar repositório ondrej/php, usando repositórios padrão..."
-    fi
-    
-    apt-get update 2>> "$LOG_FILE"
-    
-    # Instalar PHP 7.4 e extensões
-    log "Instalando PHP 7.4 e extensões..."
-    if DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        php7.4 \
-        php7.4-fpm \
-        php7.4-mysql \
-        php7.4-curl \
-        php7.4-gd \
-        php7.4-mbstring \
-        php7.4-xml \
-        php7.4-zip \
-        php7.4-json \
-        php7.4-bcmath \
-        php7.4-dom \
-        php7.4-simplexml \
-        php7.4-tokenizer 2>> "$LOG_FILE"; then
-        
-        success "✅ PHP 7.4 instalado com sucesso"
-        
-        # Configurar PHP-FPM
-        configure_php_fpm
-        
-        return 0
-    else
-        warning "❌ Falha ao instalar PHP 7.4, tentando método alternativo..."
-        
-        # Método alternativo: instalar php-fpm genérico
-        if apt-get install -y php-fpm php-mysql php-curl php-gd php-mbstring php-xml 2>> "$LOG_FILE"; then
-            success "✅ PHP instalado (versão genérica)"
-            configure_php_fpm
-            return 0
-        else
-            error "Falha crítica ao instalar PHP"
-            return 1
-        fi
-    fi
-}
-
-# ==================== CONFIGURAR PHP-FPM - VERSÃO CORRIGIDA ====================
-configure_php_fpm() {
-    log "Configurando PHP-FPM..."
-    
-    # Encontrar o serviço PHP-FPM correto
-    PHP_FPM_SERVICE=""
-    for service in php7.4-fpm php7.3-fpm php7.2-fpm php-fpm; do
-        if systemctl list-unit-files | grep -q "^${service}" 2>/dev/null; then
-            PHP_FPM_SERVICE=$service
-            break
-        fi
-    done
-    
-    if [ -z "$PHP_FPM_SERVICE" ]; then
-        # Tentar instalar php-fpm genérico
-        apt-get install -y php-fpm 2>> "$LOG_FILE" || return 1
-        PHP_FPM_SERVICE="php-fpm"
-    fi
-    
-    # Configurar arquivo de pool
-    PHP_FPM_CONF=""
-    for conf in /etc/php/7.4/fpm/pool.d/www.conf /etc/php/7.3/fpm/pool.d/www.conf /etc/php/7.2/fpm/pool.d/www.conf /etc/php/fpm/pool.d/www.conf; do
-        if [ -f "$conf" ]; then
-            PHP_FPM_CONF=$conf
-            break
-        fi
-    done
-    
-    if [ -n "$PHP_FPM_CONF" ]; then
-        # Backup
-        cp "$PHP_FPM_CONF" "${PHP_FPM_CONF}.backup"
-        
-        # Configurar para usar TCP (mais confiável)
-        sed -i 's/^listen = .*/listen = 127.0.0.1:9000/' "$PHP_FPM_CONF" 2>/dev/null || true
-        sed -i 's/^;listen.allowed_clients/listen.allowed_clients/' "$PHP_FPM_CONF" 2>/dev/null || true
-        
-        # Configurar permissões
-        sed -i 's/^user = .*/user = www-data/' "$PHP_FPM_CONF" 2>/dev/null || true
-        sed -i 's/^group = .*/group = www-data/' "$PHP_FPM_CONF" 2>/dev/null || true
-        
-        # Aumentar limites
-        sed -i 's/^pm.max_children = .*/pm.max_children = 50/' "$PHP_FPM_CONF" 2>/dev/null || true
-        sed -i 's/^pm.start_servers = .*/pm.start_servers = 5/' "$PHP_FPM_CONF" 2>/dev/null || true
-        sed -i 's/^pm.min_spare_servers = .*/pm.min_spare_servers = 5/' "$PHP_FPM_CONF" 2>/dev/null || true
-        sed -i 's/^pm.max_spare_servers = .*/pm.max_spare_servers = 10/' "$PHP_FPM_CONF" 2>/dev/null || true
-        
-        success "✅ PHP-FPM configurado em $PHP_FPM_CONF"
-    fi
-    
-    # Configurar php.ini para aumentar limites
-    PHP_INI=""
-    for ini in /etc/php/7.4/fpm/php.ini /etc/php/7.3/fpm/php.ini /etc/php/7.2/fpm/php.ini /etc/php/fpm/php.ini; do
-        if [ -f "$ini" ]; then
-            PHP_INI=$ini
-            break
-        fi
-    done
-    
-    if [ -n "$PHP_INI" ]; then
-        sed -i 's/^max_execution_time = .*/max_execution_time = 300/' "$PHP_INI" 2>/dev/null || true
-        sed -i 's/^max_input_time = .*/max_input_time = 300/' "$PHP_INI" 2>/dev/null || true
-        sed -i 's/^memory_limit = .*/memory_limit = 256M/' "$PHP_INI" 2>/dev/null || true
-        sed -i 's/^upload_max_filesize = .*/upload_max_filesize = 100M/' "$PHP_INI" 2>/dev/null || true
-        sed -i 's/^post_max_size = .*/post_max_size = 100M/' "$PHP_INI" 2>/dev/null || true
-        sed -i 's/^;date.timezone =.*/date.timezone = America\/Sao_Paulo/' "$PHP_INI" 2>/dev/null || true
-        success "✅ php.ini configurado"
-    fi
-    
-    # INICIAR O SERVIÇO PHP-FPM
-    log "Iniciando serviço $PHP_FPM_SERVICE..."
-    
-    # Recarregar daemons
-    systemctl daemon-reload 2>/dev/null || true
-    
-    # Parar se já estiver rodando
-    systemctl stop "$PHP_FPM_SERVICE" 2>/dev/null || true
-    sleep 2
-    
-    # Iniciar serviço
-    if systemctl start "$PHP_FPM_SERVICE" 2>> "$LOG_FILE"; then
-        sleep 3
-        
-        if systemctl is-active --quiet "$PHP_FPM_SERVICE"; then
-            success "✅ PHP-FPM iniciado: $PHP_FPM_SERVICE"
-            
-            # Verificar se está ouvindo na porta
-            sleep 2
-            if netstat -tuln 2>/dev/null | grep -q ":9000"; then
-                success "✅ PHP-FPM ouvindo na porta 9000"
-            else
-                warning "⚠ PHP-FPM não está ouvindo na porta 9000 (pode levar alguns segundos)"
-            fi
-        else
-            warning "⚠ PHP-FPM não está ativo após iniciar, tentando novamente..."
-            systemctl restart "$PHP_FPM_SERVICE" 2>/dev/null || true
-            sleep 3
-        fi
-    else
-        warning "⚠ Não foi possível iniciar $PHP_FPM_SERVICE via systemctl"
-    fi
-    
-    # Habilitar para iniciar no boot
-    systemctl enable "$PHP_FPM_SERVICE" 2>> "$LOG_FILE" || warning "⚠ Não foi possível habilitar $PHP_FPM_SERVICE"
-    
-    return 0
 }
 
 # ==================== CRIAR DIRETÓRIOS ====================
@@ -296,6 +91,161 @@ create_directory_structure() {
     return 0
 }
 
+# ==================== INSTALAR PHP 7.4 ====================
+install_php_74() {
+    log "Instalando PHP 7.4..."
+    
+    # Atualizar repositórios
+    apt-get update 2>> "$LOG_FILE"
+    
+    # Instalar dependências necessárias
+    log "Instalando dependências..."
+    apt-get install -y software-properties-common curl wget gnupg 2>> "$LOG_FILE" || true
+    
+    # Adicionar repositório ondrej/php
+    log "Adicionando repositório ondrej/php..."
+    add-apt-repository -y ppa:ondrej/php 2>> "$LOG_FILE" || {
+        log "Instalando software-properties-common..."
+        apt-get install -y software-properties-common
+        add-apt-repository -y ppa:ondrej/php 2>> "$LOG_FILE"
+    }
+    
+    apt-get update 2>> "$LOG_FILE"
+    
+    # Instalar PHP 7.4 e extensões
+    log "Instalando PHP 7.4 e extensões..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        php7.4 \
+        php7.4-fpm \
+        php7.4-mysql \
+        php7.4-curl \
+        php7.4-gd \
+        php7.4-mbstring \
+        php7.4-xml \
+        php7.4-zip \
+        php7.4-json \
+        php7.4-bcmath \
+        php7.4-dom \
+        php7.4-simplexml \
+        php7.4-tokenizer 2>> "$LOG_FILE"
+    
+    if [ $? -eq 0 ]; then
+        success "✅ PHP 7.4 instalado com sucesso"
+    else
+        warning "⚠ Tentando método alternativo..."
+        apt-get install -y php-fpm php-mysql php-curl php-gd php-mbstring php-xml php-zip 2>> "$LOG_FILE"
+    fi
+    
+    # Configurar PHP-FPM
+    configure_php_fpm
+    
+    return 0
+}
+
+# ==================== CONFIGURAR PHP-FPM ====================
+configure_php_fpm() {
+    log "Configurando PHP-FPM..."
+    
+    # Encontrar o serviço PHP-FPM
+    PHP_FPM_SERVICE=""
+    for service in php7.4-fpm php7.3-fpm php7.2-fpm php-fpm; do
+        if systemctl list-unit-files | grep -q "^${service}" 2>/dev/null; then
+            PHP_FPM_SERVICE=$service
+            break
+        fi
+    done
+    
+    if [ -z "$PHP_FPM_SERVICE" ]; then
+        error "❌ Nenhum serviço PHP-FPM encontrado"
+        return 1
+    fi
+    
+    # Configurar arquivo de pool
+    PHP_FPM_CONF=""
+    for conf in /etc/php/7.4/fpm/pool.d/www.conf /etc/php/7.3/fpm/pool.d/www.conf /etc/php/7.2/fpm/pool.d/www.conf /etc/php/fpm/pool.d/www.conf; do
+        if [ -f "$conf" ]; then
+            PHP_FPM_CONF=$conf
+            break
+        fi
+    done
+    
+    if [ -n "$PHP_FPM_CONF" ]; then
+        # Backup
+        cp "$PHP_FPM_CONF" "${PHP_FPM_CONF}.backup" 2>/dev/null || true
+        
+        # Configurar para usar TCP
+        sed -i 's/^listen = .*/listen = 127.0.0.1:9000/' "$PHP_FPM_CONF" 2>/dev/null || true
+        sed -i 's/^;listen.allowed_clients = .*/listen.allowed_clients = 127.0.0.1/' "$PHP_FPM_CONF" 2>/dev/null || true
+        
+        # Configurar usuário/grupo
+        sed -i 's/^user = .*/user = www-data/' "$PHP_FPM_CONF" 2>/dev/null || true
+        sed -i 's/^group = .*/group = www-data/' "$PHP_FPM_CONF" 2>/dev/null || true
+        
+        # Aumentar limites
+        sed -i 's/^pm.max_children = .*/pm.max_children = 50/' "$PHP_FPM_CONF" 2>/dev/null || true
+        sed -i 's/^pm.start_servers = .*/pm.start_servers = 5/' "$PHP_FPM_CONF" 2>/dev/null || true
+        sed -i 's/^pm.min_spare_servers = .*/pm.min_spare_servers = 5/' "$PHP_FPM_CONF" 2>/dev/null || true
+        sed -i 's/^pm.max_spare_servers = .*/pm.max_spare_servers = 10/' "$PHP_FPM_CONF" 2>/dev/null || true
+        
+        success "✅ PHP-FPM configurado em $PHP_FPM_CONF"
+    fi
+    
+    # Configurar php.ini
+    PHP_INI=""
+    for ini in /etc/php/7.4/fpm/php.ini /etc/php/7.3/fpm/php.ini /etc/php/7.2/fpm/php.ini /etc/php/fpm/php.ini; do
+        if [ -f "$ini" ]; then
+            PHP_INI=$ini
+            break
+        fi
+    done
+    
+    if [ -n "$PHP_INI" ]; then
+        sed -i 's/^max_execution_time = .*/max_execution_time = 300/' "$PHP_INI" 2>/dev/null || true
+        sed -i 's/^max_input_time = .*/max_input_time = 300/' "$PHP_INI" 2>/dev/null || true
+        sed -i 's/^memory_limit = .*/memory_limit = 256M/' "$PHP_INI" 2>/dev/null || true
+        sed -i 's/^upload_max_filesize = .*/upload_max_filesize = 100M/' "$PHP_INI" 2>/dev/null || true
+        sed -i 's/^post_max_size = .*/post_max_size = 100M/' "$PHP_INI" 2>/dev/null || true
+        sed -i 's/^;date.timezone =.*/date.timezone = America\/Sao_Paulo/' "$PHP_INI" 2>/dev/null || true
+        success "✅ php.ini configurado"
+    fi
+    
+    # INICIAR O SERVIÇO PHP-FPM
+    log "Iniciando serviço $PHP_FPM_SERVICE..."
+    
+    # Recarregar daemons
+    systemctl daemon-reload 2>/dev/null || true
+    
+    # Parar se já estiver rodando
+    systemctl stop "$PHP_FPM_SERVICE" 2>/dev/null || true
+    sleep 2
+    
+    # Iniciar e habilitar serviço
+    systemctl enable "$PHP_FPM_SERVICE" 2>> "$LOG_FILE" || warning "⚠ Não foi possível habilitar $PHP_FPM_SERVICE"
+    
+    if systemctl start "$PHP_FPM_SERVICE" 2>> "$LOG_FILE"; then
+        sleep 3
+        if systemctl is-active --quiet "$PHP_FPM_SERVICE"; then
+            success "✅ PHP-FPM iniciado: $PHP_FPM_SERVICE"
+            
+            # Verificar porta
+            sleep 2
+            if ss -tuln | grep -q ":9000"; then
+                success "✅ PHP-FPM ouvindo na porta 9000"
+            else
+                warning "⚠ PHP-FPM não está ouvindo na porta 9000"
+            fi
+        else
+            warning "⚠ PHP-FPM não está ativo, tentando reiniciar..."
+            systemctl restart "$PHP_FPM_SERVICE" 2>/dev/null || true
+            sleep 3
+        fi
+    else
+        warning "⚠ Não foi possível iniciar $PHP_FPM_SERVICE via systemctl"
+    fi
+    
+    return 0
+}
+
 # ==================== ARQUIVOS BACKEND ====================
 create_backend_files() {
     log "Criando arquivos do backend Python..."
@@ -320,7 +270,7 @@ redis==5.0.1
 python-multipart==0.0.6
 EOF
 
-    # main.py funcional
+    # main.py
     cat > "$BACKEND_DIR/app/main.py" << 'EOF'
 """
 VOD Sync System - Backend Principal
@@ -451,13 +401,13 @@ EOF
     return 0
 }
 
-# ==================== ARQUIVOS FRONTEND PHP 7.4 COMPATÍVEL ====================
+# ==================== ARQUIVOS FRONTEND ====================
 create_frontend_files() {
     log "Criando arquivos do frontend PHP 7.4 compatível..."
     
     cd "$FRONTEND_DIR" || return 1
     
-    # index.php principal (compatível com PHP 7.4)
+    # index.php principal
     cat > "$FRONTEND_DIR/public/index.php" << 'EOF'
 <?php
 /**
@@ -716,7 +666,7 @@ $api_status = $api_online ? 'online' : 'offline';
 </html>
 EOF
 
-    # login.php compatível
+    # login.php
     cat > "$FRONTEND_DIR/public/login.php" << 'EOF'
 <?php
 session_start();
@@ -754,7 +704,7 @@ header('Location: /');
 exit();
 EOF
 
-    # dashboard.php básico
+    # dashboard.php
     cat > "$FRONTEND_DIR/public/dashboard.php" << 'EOF'
 <?php
 session_start();
@@ -973,19 +923,7 @@ header('Location: /');
 exit();
 EOF
 
-    # Configuração PHP
-    cat > "$FRONTEND_DIR/config/database.php" << 'EOF'
-<?php
-return [
-    'host' => 'localhost',
-    'database' => 'vod_system',
-    'username' => 'vodsync_user',
-    'password' => '', // Será preenchido durante instalação
-    'charset' => 'utf8mb4'
-];
-EOF
-
-    success "✅ Arquivos do frontend criados (PHP 7.4 compatível)"
+    success "✅ Arquivos do frontend criados"
     return 0
 }
 
@@ -997,10 +935,10 @@ setup_nginx() {
     if ! command -v nginx &> /dev/null; then
         log "Instalando Nginx..."
         apt-get update
-        if ! apt-get install -y nginx 2>> "$LOG_FILE"; then
+        apt-get install -y nginx 2>> "$LOG_FILE" || {
             error "Falha ao instalar Nginx"
             return 1
-        fi
+        }
         success "✅ Nginx instalado"
     fi
     
@@ -1011,16 +949,15 @@ setup_nginx() {
         sleep 2
     fi
     
-    # 3. Criar configuração
+    # 3. Criar configuração SIMPLES
     log "Criando configuração Nginx..."
     
-    # Backup da configuração atual se existir
-    if [ -f /etc/nginx/sites-available/vod-sync ]; then
-        cp /etc/nginx/sites-available/vod-sync "/etc/nginx/sites-available/vod-sync.backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
-    fi
+    # Remover configurações conflitantes
+    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+    rm -f /etc/nginx/sites-available/default 2>/dev/null || true
     
-    # Configuração
-    cat > /tmp/vod-sync-nginx.conf << 'NGINX_SIMPLE'
+    # Criar configuração
+    cat > /etc/nginx/sites-available/vod-sync << 'NGINX_CONFIG'
 server {
     listen 80;
     listen [::]:80;
@@ -1037,98 +974,89 @@ server {
     # Backend API
     location /api/ {
         proxy_pass http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_cache_bypass $http_upgrade;
     }
     
     # PHP
     location ~ \.php$ {
-        try_files $uri =404;
-        fastcgi_split_path_info ^(.+\.php)(/.+)$;
-        fastcgi_pass 127.0.0.1:9000;
-        fastcgi_index index.php;
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/var/run/php/php7.4-fpm.sock;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        fastcgi_param SCRIPT_NAME $fastcgi_script_name;
         include fastcgi_params;
-        
-        # Timeouts
-        fastcgi_read_timeout 300;
-        fastcgi_connect_timeout 300;
-        fastcgi_send_timeout 300;
     }
     
     # Bloquear arquivos ocultos
     location ~ /\. {
-        deny all;
-        return 404;
-    }
-    
-    location ~ /\.ht {
         deny all;
     }
     
     # Tamanho máximo de upload
     client_max_body_size 100M;
 }
-NGINX_SIMPLE
+NGINX_CONFIG
     
-    # Mover para local correto
-    cp /tmp/vod-sync-nginx.conf /etc/nginx/sites-available/vod-sync
+    # 4. Ativar site
+    ln -sf /etc/nginx/sites-available/vod-sync /etc/nginx/sites-enabled/ 2>/dev/null || {
+        cp /etc/nginx/sites-available/vod-sync /etc/nginx/sites-enabled/vod-sync
+    }
     
-    # 4. Remover site default para evitar conflitos
-    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
-    
-    # 5. Ativar nosso site
-    ln -sf /etc/nginx/sites-available/vod-sync /etc/nginx/sites-enabled/ 2>/dev/null || true
-    
-    # 6. TESTAR configuração
+    # 5. Testar configuração
     log "Testando configuração Nginx..."
-    
     if nginx -t 2>> "$LOG_FILE"; then
         success "✅ Configuração Nginx válida"
     else
-        error "❌ Configuração Nginx inválida"
-        return 1
+        # Criar configuração alternativa mais simples
+        cat > /etc/nginx/sites-available/vod-sync << 'NGINX_SIMPLE'
+server {
+    listen 80;
+    server_name _;
+    
+    root /opt/vod-sync/frontend/public;
+    index index.php;
+    
+    location / {
+        try_files $uri $uri/ /index.php?$args;
+    }
+    
+    location ~ \.php$ {
+        include fastcgi_params;
+        fastcgi_pass unix:/var/run/php/php7.4-fpm.sock;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    }
+}
+NGINX_SIMPLE
+        
+        nginx -t 2>> "$LOG_FILE" || {
+            error "❌ Configuração Nginx inválida"
+            return 1
+        }
     fi
     
-    # 7. Iniciar Nginx
+    # 6. Iniciar Nginx
     log "Iniciando Nginx..."
+    systemctl enable nginx 2>> "$LOG_FILE" || true
     
-    # Matar processos Nginx existentes (se houver)
-    pkill -9 nginx 2>/dev/null || true
-    sleep 1
-    
-    # Tentar iniciar
     if systemctl start nginx 2>> "$LOG_FILE"; then
         sleep 3
-        
         if systemctl is-active --quiet nginx; then
-            success "✅ Nginx iniciado com sucesso na porta 80"
+            success "✅ Nginx iniciado"
             
-            # Verificar se porta 80 está aberta
-            sleep 2
-            if netstat -tuln 2>/dev/null | grep -q ":80 "; then
-                success "✅ Porta 80 ouvindo"
+            # Verificar porta
+            if ss -tuln | grep -q ":80 "; then
+                success "✅ Nginx ouvindo na porta 80"
             else
-                warning "⚠ Porta 80 não está ouvindo"
+                warning "⚠ Nginx não está ouvindo na porta 80"
             fi
         else
-            error "❌ Nginx não está ativo após iniciar"
-            return 1
+            warning "⚠ Nginx não está ativo"
         fi
     else
-        error "❌ Falha ao iniciar Nginx"
-        return 1
+        warning "⚠ Falha ao iniciar Nginx"
     fi
-    
-    # 8. Habilitar para iniciar no boot
-    systemctl enable nginx 2>> "$LOG_FILE" || warning "⚠ Não foi possível habilitar Nginx"
     
     return 0
 }
@@ -1147,7 +1075,6 @@ setup_backend() {
     
     # Criar ambiente virtual
     if ! python3 -m venv venv 2>> "$LOG_FILE"; then
-        # Tentar instalar python3-venv
         apt-get install -y python3-venv 2>> "$LOG_FILE" || return 1
         python3 -m venv venv 2>> "$LOG_FILE" || return 1
     fi
@@ -1157,27 +1084,19 @@ setup_backend() {
     pip install --upgrade pip setuptools wheel 2>> "$LOG_FILE" || true
     
     log "Instalando dependências Python..."
-    if ! pip install -r requirements.txt 2>> "$LOG_FILE"; then
-        warning "Algumas dependências falharam, tentando instalação básica..."
-        pip install fastapi uvicorn pymysql python-dotenv 2>> "$LOG_FILE" || return 1
-    fi
-    
-    # Criar usuário para serviço se não existir
-    if ! id -u www-data >/dev/null 2>&1; then
-        useradd -r -s /bin/false www-data 2>> "$LOG_FILE" || true
-    fi
+    pip install fastapi uvicorn pymysql python-dotenv 2>> "$LOG_FILE" || {
+        pip install fastapi uvicorn 2>> "$LOG_FILE" || return 1
+    }
     
     # Configurar permissões
     chown -R www-data:www-data "$BACKEND_DIR" 2>/dev/null || true
     chmod -R 755 "$BACKEND_DIR" 2>/dev/null || true
-    chmod +x "$BACKEND_DIR/start.sh" 2>/dev/null || true
     
     # Criar serviço systemd
     cat > /etc/systemd/system/vod-sync-backend.service << 'SERVICE_CONFIG'
 [Unit]
 Description=VOD Sync System Backend API
 After=network.target
-Wants=network.target
 
 [Service]
 Type=simple
@@ -1185,17 +1104,9 @@ User=www-data
 Group=www-data
 WorkingDirectory=/opt/vod-sync/backend
 Environment="PATH=/opt/vod-sync/backend/venv/bin"
-ExecStart=/opt/vod-sync/backend/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+ExecStart=/opt/vod-sync/backend/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=10
-StandardOutput=journal
-StandardError=journal
-
-# Segurança
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ReadWritePaths=/opt/vod-sync/backend/logs
 
 [Install]
 WantedBy=multi-user.target
@@ -1205,29 +1116,30 @@ SERVICE_CONFIG
     systemctl daemon-reload 2>/dev/null || true
     
     # Habilitar serviço
-    systemctl enable vod-sync-backend 2>> "$LOG_FILE" || warning "Não foi possível habilitar serviço backend"
+    systemctl enable vod-sync-backend 2>> "$LOG_FILE" || true
     
-    # Tentar iniciar
+    # Iniciar serviço
     log "Iniciando serviço backend..."
+    systemctl stop vod-sync-backend 2>/dev/null || true
+    sleep 2
+    
     if systemctl start vod-sync-backend 2>> "$LOG_FILE"; then
-        sleep 3
+        sleep 5
         
-        # Verificar status
         if systemctl is-active --quiet vod-sync-backend; then
             success "✅ Backend rodando na porta 8000"
             
             # Testar endpoint
-            sleep 2
-            if curl -s --connect-timeout 5 http://localhost:8000/health >/dev/null 2>&1; then
-                success "✅ API respondendo corretamente"
+            if curl -s --connect-timeout 10 http://localhost:8000/health >/dev/null 2>&1; then
+                success "✅ API respondendo"
             else
-                warning "⚠ API não responde, mas serviço está rodando"
+                warning "⚠ API não responde (pode levar mais tempo para iniciar)"
             fi
         else
-            warning "⚠ Backend não está ativo após iniciar"
+            warning "⚠ Backend não está ativo"
         fi
     else
-        warning "⚠ Falha ao iniciar serviço backend"
+        warning "⚠ Falha ao iniciar backend"
     fi
     
     return 0
@@ -1238,236 +1150,96 @@ setup_database() {
     log "Configurando banco de dados..."
     
     # Verificar MySQL/MariaDB
-    MYSQL_SERVICE=""
-    for service in mysql mariadb; do
-        if systemctl list-unit-files | grep -q "^${service}" 2>/dev/null; then
-            MYSQL_SERVICE="$service"
-            break
-        fi
-    done
-    
-    # Instalar se necessário
-    if [ -z "$MYSQL_SERVICE" ]; then
-        log "Instalando MySQL..."
-        apt-get update
-        if ! apt-get install -y mysql-server 2>> "$LOG_FILE"; then
-            error "Falha ao instalar MySQL"
+    if ! systemctl list-unit-files | grep -q "mysql" && ! systemctl list-unit-files | grep -q "mariadb"; then
+        log "Instalando MariaDB..."
+        apt-get install -y mariadb-server 2>> "$LOG_FILE" || {
+            error "Falha ao instalar MariaDB"
             return 1
-        fi
-        MYSQL_SERVICE="mysql"
+        }
     fi
     
     # Iniciar serviço
-    if ! systemctl start "$MYSQL_SERVICE" 2>> "$LOG_FILE"; then
-        error "Falha ao iniciar $MYSQL_SERVICE"
-        return 1
+    if systemctl list-unit-files | grep -q "mysql"; then
+        DB_SERVICE="mysql"
+    else
+        DB_SERVICE="mariadb"
     fi
     
-    systemctl enable "$MYSQL_SERVICE" 2>> "$LOG_FILE" || true
+    systemctl start "$DB_SERVICE" 2>> "$LOG_FILE" || {
+        error "Falha ao iniciar $DB_SERVICE"
+        return 1
+    }
     
-    # Aguardar MySQL iniciar
+    systemctl enable "$DB_SERVICE" 2>> "$LOG_FILE" || true
+    
+    # Aguardar iniciar
     sleep 5
     
     # Credenciais
     DB_NAME="vod_system"
     DB_USER="vodsync_user"
-    DB_PASS="VodSync_$(openssl rand -hex 8 2>/dev/null || echo 'VodSync123')"
+    DB_PASS="VodSync123"  # Senha simples para testes
     
     # Criar banco e usuário
     log "Criando banco de dados..."
-    if ! mysql -e "CREATE DATABASE IF NOT EXISTS $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>> "$LOG_FILE"; then
+    mysql -e "CREATE DATABASE IF NOT EXISTS $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>> "$LOG_FILE" || {
         error "Falha ao criar banco"
         return 1
-    fi
+    }
     
     # Verificar se usuário já existe
     if ! mysql -e "SELECT User FROM mysql.user WHERE User='$DB_USER'" 2>/dev/null | grep -q "$DB_USER"; then
-        if ! mysql -e "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';" 2>> "$LOG_FILE"; then
+        mysql -e "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';" 2>> "$LOG_FILE" || {
             error "Falha ao criar usuário"
             return 1
-        fi
-    else
-        mysql -e "ALTER USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';" 2>> "$LOG_FILE" || warning "Não foi possível alterar senha do usuário"
+        }
     fi
     
-    mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';" 2>> "$LOG_FILE" || error "Falha ao conceder privilégios"
+    mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';" 2>> "$LOG_FILE" || {
+        error "Falha ao conceder privilégios"
+        return 1
+    }
+    
     mysql -e "FLUSH PRIVILEGES;" 2>> "$LOG_FILE"
     
     # Criar estrutura básica
     log "Criando tabelas..."
     cat > /tmp/vod_schema.sql << 'SQL_SCHEMA'
--- Tabela de usuários
 CREATE TABLE IF NOT EXISTS users (
     id INT PRIMARY KEY AUTO_INCREMENT,
     username VARCHAR(50) UNIQUE NOT NULL,
-    email VARCHAR(100),
     password_hash VARCHAR(255) NOT NULL,
     user_type ENUM('admin', 'reseller', 'user') DEFAULT 'user',
-    is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB;
+);
 
--- Tabela de conexões XUI
-CREATE TABLE IF NOT EXISTS xui_connections (
-    id INT PRIMARY KEY AUTO_INCREMENT,
-    user_id INT NOT NULL,
-    alias VARCHAR(100),
-    host VARCHAR(255) NOT NULL,
-    port INT DEFAULT 3306,
-    username VARCHAR(100) NOT NULL,
-    password VARCHAR(255) NOT NULL,
-    is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB;
-
--- Tabela de listas M3U
-CREATE TABLE IF NOT EXISTS m3u_lists (
-    id INT PRIMARY KEY AUTO_INCREMENT,
-    user_id INT NOT NULL,
-    name VARCHAR(255),
-    m3u_content LONGTEXT,
-    is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB;
-
--- Tabela de logs
-CREATE TABLE IF NOT EXISTS sync_logs (
-    id INT PRIMARY KEY AUTO_INCREMENT,
-    user_id INT NOT NULL,
-    message TEXT,
-    log_type ENUM('info', 'success', 'warning', 'error') DEFAULT 'info',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB;
-
--- Inserir usuário admin padrão (senha: admin123)
 INSERT IGNORE INTO users (username, password_hash, user_type) VALUES 
 ('admin', '$2b$12$LQv3c1yqBWVHxpd5g8T3e.BHZzl6CLj7/5L8OYyN8pMZ7cJkzq6W2', 'admin'),
 ('reseller', '$2b$12$LQv3c1yqBWVHxpd5g8T3e.BHZzl6CLj7/5L8OYyN8pMZ7cJkzq6W2', 'reseller'),
 ('user', '$2b$12$LQv3c1yqBWVHxpd5g8T3e.BHZzl6CLj7/5L8OYyN8pMZ7cJkzq6W2', 'user');
-
--- Inserir logs iniciais
-INSERT IGNORE INTO sync_logs (user_id, message, log_type) VALUES
-(1, 'Sistema instalado com sucesso', 'success'),
-(1, 'Banco de dados configurado', 'info');
 SQL_SCHEMA
     
     mysql "$DB_NAME" < /tmp/vod_schema.sql 2>> "$LOG_FILE" || warning "Alguns erros ao criar tabelas"
     
-    # Atualizar .env com credenciais
+    # Atualizar .env
     sed -i "s/DB_PASS=.*/DB_PASS=$DB_PASS/" "$BACKEND_DIR/.env" 2>/dev/null || true
     
-    # Salvar credenciais
-    cat > /root/vod-sync-credentials.txt << CREDENTIALS
-============================================
-CREDENCIAIS VOD SYNC SYSTEM - PHP 7.4
-============================================
-INSTALAÇÃO CONCLUÍDA EM: $(date)
-
-🌐 URL DE ACESSO:
-   Frontend: http://$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}' 2>/dev/null || echo "localhost")
-   Backend API: http://localhost:8000
-
-👤 USUÁRIOS PADRÃO:
-   Administrador: admin / admin123
-   Revendedor: reseller / reseller123
-   Usuário: user / user123
-
-🗄️ BANCO DE DADOS:
-   Banco: $DB_NAME
-   Usuário: $DB_USER
-   Senha: $DB_PASS
-   Host: localhost:3306
-
-🔧 SERVIÇOS:
-   Nginx: porta 80
-   Backend: porta 8000
-   PHP-FPM: php7.4-fpm (porta 9000)
-   MySQL: porta 3306
-
-📁 DIRETÓRIOS:
-   Sistema: $BASE_DIR
-   Backend: $BACKEND_DIR
-   Frontend: $FRONTEND_DIR
-   Logs: $BACKEND_DIR/logs/
-
-⚡ COMANDOS ÚTEIS:
-   sudo systemctl status vod-sync-backend
-   sudo systemctl status php7.4-fpm
-   sudo tail -f /var/log/nginx/error.log
-
-⚠️ IMPORTANTE:
-   1. Configure sua chave TMDb API em: $BACKEND_DIR/.env
-   2. ALTERE AS SENHAS NO PRIMEIRO ACESSO!
-============================================
-CREDENTIALS
-    
     success "✅ Banco de dados configurado"
-    log "📄 Credenciais salvas em: /root/vod-sync-credentials.txt"
-    
     return 0
 }
 
-# ==================== TESTAR PHP 7.4 ====================
-test_php_74() {
-    log "Testando PHP 7.4..."
+# ==================== TESTAR INSTALAÇÃO ====================
+test_installation() {
+    log "Testando instalação..."
     
     # Criar arquivo de teste PHP
-    cat > /opt/vod-sync/frontend/public/test-php.php << 'PHP_TEST'
+    cat > "$FRONTEND_DIR/public/test.php" << 'PHP_TEST'
 <?php
-// Teste de compatibilidade PHP 7.4
-echo "<!DOCTYPE html>\n";
-echo "<html>\n";
-echo "<head><title>Teste PHP 7.4</title></head>\n";
-echo "<body style='font-family: Arial, sans-serif; padding: 20px;'>\n";
-echo "<h1>✅ Teste PHP 7.4</h1>\n";
-echo "<p>Versão do PHP: <strong>" . phpversion() . "</strong></p>\n";
-
-// Testar extensões necessárias
-$extensoes = ['pdo', 'pdo_mysql', 'json', 'curl', 'mbstring', 'session', 'mysqli', 'gd'];
-echo "<h3>Extensões PHP:</h3>\n";
-echo "<ul>\n";
-foreach ($extensoes as $ext) {
-    $status = extension_loaded($ext) ? "✅" : "❌";
-    echo "<li>$status $ext</li>\n";
-}
-echo "</ul>\n";
-
-// Testar configurações
-echo "<h3>Configurações:</h3>\n";
-echo "<ul>\n";
-echo "<li>memory_limit: " . ini_get('memory_limit') . "</li>\n";
-echo "<li>upload_max_filesize: " . ini_get('upload_max_filesize') . "</li>\n";
-echo "<li>post_max_size: " . ini_get('post_max_size') . "</li>\n";
-echo "<li>max_execution_time: " . ini_get('max_execution_time') . "</li>\n";
-echo "<li>date.timezone: " . ini_get('date.timezone') . "</li>\n";
-echo "</ul>\n";
-
-// Testar escrita
-$test_file = '/tmp/php_test_' . time() . '.txt';
-if (file_put_contents($test_file, 'Teste de escrita')) {
-    echo "<p>✅ Escrita no sistema de arquivos: OK</p>\n";
-    unlink($test_file);
-} else {
-    echo "<p>❌ Escrita no sistema de arquivos: FALHOU</p>\n";
-}
-
-// Link para phpinfo
-echo '<p><a href="/phpinfo.php" target="_blank">Ver phpinfo() completo</a></p>';
-echo '<p><a href="/">Voltar para o sistema</a></p>';
-
-echo "</body>\n";
-echo "</html>\n";
+phpinfo();
 ?>
 PHP_TEST
     
-    # Criar phpinfo
-    cat > /opt/vod-sync/frontend/public/phpinfo.php << 'EOF'
-<?php phpinfo(); ?>
-EOF
-    
-    log "Arquivo de teste criado: http://seu-ip/test-php.php"
-    
-    return 0
+    success "✅ Arquivo de teste criado: http://seu-ip/test.php"
 }
 
 # ==================== VERIFICAÇÃO FINAL ====================
@@ -1478,46 +1250,87 @@ verify_installation() {
     
     # Verificar serviços
     echo "📦 STATUS DOS SERVIÇOS:"
-    services=("nginx" "vod-sync-backend" "php7.4-fpm" "php-fpm" "mysql" "mariadb")
-    for service in "${services[@]}"; do
-        if systemctl list-unit-files | grep -q "^${service}" 2>/dev/null; then
-            status=$(systemctl is-active "$service" 2>/dev/null || echo "inactive")
-            if [ "$status" = "active" ]; then
-                echo "  ✅ $service: ATIVO"
-            elif [ "$status" = "activating" ]; then
-                echo "  ⚠ $service: INICIANDO"
-            else
-                echo "  ❌ $service: $status"
-            fi
+    
+    # Nginx
+    if systemctl is-active --quiet nginx; then
+        echo "  ✅ Nginx: ATIVO"
+    else
+        echo "  ❌ Nginx: INATIVO"
+        echo "     Tentando iniciar..."
+        systemctl start nginx 2>/dev/null && sleep 2
+        if systemctl is-active --quiet nginx; then
+            echo "  ✅ Nginx: AGORA ATIVO"
+        fi
+    fi
+    
+    # PHP-FPM
+    PHP_FPM_ACTIVE=false
+    for service in php7.4-fpm php7.3-fpm php7.2-fpm php-fpm; do
+        if systemctl is-active --quiet "$service" 2>/dev/null; then
+            echo "  ✅ $service: ATIVO"
+            PHP_FPM_ACTIVE=true
+            break
+        fi
+    done
+    
+    if [ "$PHP_FPM_ACTIVE" = false ]; then
+        echo "  ❌ PHP-FPM: INATIVO"
+        echo "     Tentando iniciar php7.4-fpm..."
+        systemctl start php7.4-fpm 2>/dev/null && sleep 2
+        if systemctl is-active --quiet php7.4-fpm; then
+            echo "  ✅ php7.4-fpm: AGORA ATIVO"
+        fi
+    fi
+    
+    # Backend
+    if systemctl is-active --quiet vod-sync-backend; then
+        echo "  ✅ Backend: ATIVO"
+    else
+        echo "  ❌ Backend: INATIVO"
+        echo "     Tentando iniciar..."
+        systemctl start vod-sync-backend 2>/dev/null && sleep 3
+        if systemctl is-active --quiet vod-sync-backend; then
+            echo "  ✅ Backend: AGORA ATIVO"
+        fi
+    fi
+    
+    # MySQL/MariaDB
+    DB_ACTIVE=false
+    for service in mysql mariadb; do
+        if systemctl is-active --quiet "$service" 2>/dev/null; then
+            echo "  ✅ $service: ATIVO"
+            DB_ACTIVE=true
+            break
         fi
     done
     
     echo ""
     echo "🌐 TESTE DE CONEXÕES:"
     
-    # Testar API
-    if curl -s --connect-timeout 5 http://localhost:8000/health >/dev/null 2>&1; then
-        echo "  ✅ Backend API: RESPONDENDO"
-    else
-        echo "  ❌ Backend API: NÃO RESPONDE"
-    fi
-    
     # Testar PHP-FPM
-    if netstat -tuln 2>/dev/null | grep -q ":9000 "; then
+    if ss -tuln | grep -q ":9000"; then
         echo "  ✅ PHP-FPM: RODANDO (porta 9000)"
     else
         echo "  ❌ PHP-FPM: NÃO RODANDO"
     fi
     
     # Testar Nginx
-    if netstat -tuln 2>/dev/null | grep -q ":80 "; then
+    if ss -tuln | grep -q ":80 "; then
         echo "  ✅ Nginx: RODANDO (porta 80)"
     else
         echo "  ❌ Nginx: NÃO RODANDO"
     fi
     
+    # Testar Backend API
+    if curl -s --connect-timeout 5 http://localhost:8000/ >/dev/null 2>&1; then
+        echo "  ✅ Backend API: RESPONDENDO"
+    else
+        echo "  ❌ Backend API: NÃO RESPONDE"
+    fi
+    
     echo ""
     echo "📁 ESTRUTURA DE ARQUIVOS:"
+    
     if [ -f "$BACKEND_DIR/app/main.py" ]; then
         echo "  ✅ Backend: OK"
     else
@@ -1536,18 +1349,17 @@ verify_installation() {
         echo "  ❌ Nginx Config: FALTANDO"
     fi
     
-    # Mostrar URLs de acesso
     echo ""
     echo "══════════════════════════════════════════════════════════"
-    echo "🎉 INSTALAÇÃO CONCLUÍDA COM SUCESSO! (PHP 7.4)"
+    echo "🎉 INSTALAÇÃO CONCLUÍDA!"
     echo ""
     
-    IP_ADDR=$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}' 2>/dev/null || echo "localhost")
+    IP_ADDR=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "localhost")
     
     echo "🌐 ACESSO AO SISTEMA:"
-    echo "   URL Principal: http://$IP_ADDR"
-    echo "   Teste PHP: http://$IP_ADDR/test-php.php"
+    echo "   Frontend: http://$IP_ADDR"
     echo "   Backend API: http://$IP_ADDR:8000"
+    echo "   Teste PHP: http://$IP_ADDR/test.php"
     echo ""
     
     echo "🔑 CREDENCIAIS PADRÃO:"
@@ -1556,43 +1368,47 @@ verify_installation() {
     echo "   user / user123"
     echo ""
     
-    echo "📄 ARQUIVOS IMPORTANTES:"
-    echo "   Log da instalação: $LOG_FILE"
-    echo "   Credenciais: /root/vod-sync-credentials.txt"
-    echo "   Config Backend: $BACKEND_DIR/.env"
-    echo ""
-    
     echo "⚡ COMANDOS DE GERENCIAMENTO:"
-    echo "   sudo systemctl restart vod-sync-backend"
-    echo "   sudo systemctl restart php7.4-fpm"
     echo "   sudo systemctl restart nginx"
-    echo "   sudo tail -f /var/log/nginx/error.log"
+    echo "   sudo systemctl restart php7.4-fpm"
+    echo "   sudo systemctl restart vod-sync-backend"
     echo ""
     
-    echo "⚠️ PRÓXIMOS PASSOS:"
-    echo "   1. Acesse http://$IP_ADDR"
-    echo "   2. Faça login com admin/admin123"
-    echo "   3. Configure chave TMDb API no painel"
-    echo "   4. Adicione conexão XUI e lista M3U"
+    # Criar arquivo de credenciais
+    cat > /root/vod-sync-credentials.txt << EOF
+============================================
+VOD SYNC SYSTEM - CREDENCIAIS
+============================================
+URL: http://$IP_ADDR
+Backend: http://$IP_ADDR:8000
+
+Usuários:
+- admin / admin123
+- reseller / reseller123
+- user / user123
+
+Banco de Dados:
+- Banco: vod_system
+- Usuário: vodsync_user
+- Senha: VodSync123
+
+Serviços:
+- Nginx: porta 80
+- PHP-FPM: php7.4-fpm
+- Backend: porta 8000
+============================================
+EOF
+    
+    echo "📄 Credenciais salvas em: /root/vod-sync-credentials.txt"
     echo ""
     
-    echo "🔧 SE TIVER 502 BAD GATEWAY:"
-    echo "   1. sudo systemctl restart php7.4-fpm"
-    echo "   2. sudo systemctl restart nginx"
-    echo "   3. Teste: http://$IP_ADDR/test-php.php"
-    echo ""
+    # Verificar se podemos acessar via browser
+    echo "🧪 TESTE RÁPIDO:"
+    echo "   curl -I http://$IP_ADDR"
+    curl -I http://localhost 2>/dev/null | head -1 || echo "   ❌ Não foi possível conectar"
     
+    echo ""
     echo "══════════════════════════════════════════════════════════"
-    
-    # Criar flag de instalação
-    echo "install_date=$(date '+%Y-%m-%d %H:%M:%S')" > "$BASE_DIR/.installed"
-    echo "version=2.0.0-php74" >> "$BASE_DIR/.installed"
-    echo "php_version=7.4" >> "$BASE_DIR/.installed"
-    echo "frontend_url=http://$IP_ADDR" >> "$BASE_DIR/.installed"
-    echo "backend_url=http://$IP_ADDR:8000" >> "$BASE_DIR/.installed"
-    
-    # Remover arquivos de teste após 5 minutos
-    (sleep 300 && rm -f /opt/vod-sync/frontend/public/test-php.php /opt/vod-sync/frontend/public/phpinfo.php 2>/dev/null && echo "Arquivos de teste removidos") &
     
     return 0
 }
@@ -1602,67 +1418,68 @@ complete_installation() {
     print_header
     
     echo "🔄 Este instalador executará:"
-    echo "   1. 📁 Criar estrutura completa de diretórios"
-    echo "   2. 🐍 Configurar backend Python (FastAPI)"
-    echo "   3. 🌐 Instalar e configurar PHP 7.4 + Nginx"
-    echo "   4. 🗄️  Configurar banco de dados MySQL"
+    echo "   1. 📁 Criar estrutura de diretórios"
+    echo "   2. 🐍 Configurar backend Python"
+    echo "   3. 🌐 Instalar PHP 7.4 + Nginx"
+    echo "   4. 🗄️  Configurar banco de dados"
     echo "   5. ⚙️  Criar serviços systemd"
-    echo "   6. ✅ Testar e verificar instalação"
+    echo "   6. ✅ Testar instalação"
     echo ""
-    echo "⏱️  Tempo estimado: 3-5 minutos"
+    echo "⏱️  Tempo estimado: 2-3 minutos"
     echo ""
     
     read -p "Continuar com a instalação? (s/n): " -n 1 -r
     echo
     [[ $REPLY =~ ^[Ss]$ ]] || return
     
+    log "=== INICIANDO INSTALAÇÃO COMPLETA ==="
+    
     # Atualizar sistema
-    log "Atualizando pacotes do sistema..."
+    log "Atualizando pacotes..."
     apt-get update 2>> "$LOG_FILE"
     apt-get upgrade -y 2>> "$LOG_FILE" || true
     
-    # Executar passos na ordem correta com tratamento de erros
-    log "Iniciando instalação completa..."
+    # Executar passos
+    log "PASSO 1: Criando estrutura..."
+    create_directory_structure || { error "Falha na criação de estrutura"; return 1; }
     
-    log "=== PASSO 1: Verificando privilégios ==="
-    check_root
+    log "PASSO 2: Criando arquivos backend..."
+    create_backend_files || warning "Problemas com arquivos backend"
     
-    log "=== PASSO 2: Criando estrutura de diretórios ==="
-    create_directory_structure || { error "Falha ao criar estrutura de diretórios"; return 1; }
+    log "PASSO 3: Criando arquivos frontend..."
+    create_frontend_files || warning "Problemas com arquivos frontend"
     
-    log "=== PASSO 3: Criando arquivos do backend ==="
-    create_backend_files || { error "Falha ao criar arquivos do backend"; return 1; }
+    log "PASSO 4: Instalando PHP 7.4..."
+    install_php_74 || warning "Problemas com PHP 7.4"
     
-    log "=== PASSO 4: Criando arquivos do frontend ==="
-    create_frontend_files || { error "Falha ao criar arquivos do frontend"; return 1; }
+    log "PASSO 5: Configurando banco de dados..."
+    setup_database || warning "Problemas com banco de dados"
     
-    log "=== PASSO 5: Instalando PHP 7.4 ==="
-    install_php_74 || { error "Falha ao instalar PHP 7.4"; return 1; }
+    log "PASSO 6: Configurando Nginx..."
+    setup_nginx || warning "Problemas com Nginx"
     
-    log "=== PASSO 6: Configurando banco de dados ==="
-    setup_database || { error "Falha ao configurar banco de dados"; return 1; }
+    log "PASSO 7: Configurando backend..."
+    setup_backend || warning "Problemas com backend"
     
-    log "=== PASSO 7: Configurando Nginx ==="
-    setup_nginx || { error "Falha ao configurar Nginx"; return 1; }
+    log "PASSO 8: Testando..."
+    test_installation || true
     
-    log "=== PASSO 8: Configurando backend Python ==="
-    setup_backend || { error "Falha ao configurar backend"; return 1; }
-    
-    log "=== PASSO 9: Testando PHP 7.4 ==="
-    test_php_74 || { error "Falha ao testar PHP"; return 1; }
-    
-    log "=== PASSO 10: Verificação final ==="
+    log "PASSO 9: Verificação final..."
     verify_installation
     
-    success "✅ Instalação completa concluída!"
+    success "✅ Instalação concluída!"
+    
+    # Mostrar resumo
     echo ""
-    echo "📋 Resumo da instalação:"
-    echo "   • Estrutura criada em: $BASE_DIR"
+    echo "📋 RESUMO:"
+    echo "   • Sistema instalado em: $BASE_DIR"
     echo "   • Frontend PHP: $FRONTEND_DIR"
     echo "   • Backend Python: $BACKEND_DIR"
-    echo "   • Credenciais salvas em: /root/vod-sync-credentials.txt"
+    echo "   • Log da instalação: $LOG_FILE"
     echo ""
-    echo "🌐 Acesse o sistema em: http://$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}' 2>/dev/null || echo 'localhost')"
+    
+    IP_ADDR=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "localhost")
+    echo "🌐 Acesse em: http://$IP_ADDR"
     echo ""
 }
 
@@ -1674,145 +1491,102 @@ show_menu() {
         echo ""
         echo "1) 🚀 Instalação Completa (Recomendado)"
         echo "2) 📁 Apenas Criar Estrutura"
-        echo "3) 🌐 Apenas Instalar PHP 7.4 + Nginx"
-        echo "4) 🐍 Apenas Configurar Backend"
-        echo "5) 🗄️  Apenas Configurar Banco de Dados"
-        echo "6) 🧪 Testar PHP 7.4"
-        echo "7) 🔍 Verificar Sistema"
-        echo "8) 🗑️  Desinstalar Tudo"
-        echo "9) 🚪 Sair"
+        echo "3) 🌐 Apenas PHP + Nginx"
+        echo "4) 🐍 Apenas Backend"
+        echo "5) 🗄️  Apenas Banco de Dados"
+        echo "6) 🔍 Verificar Sistema"
+        echo "7) 🗑️  Desinstalar"
+        echo "8) 🚪 Sair"
         echo ""
         read -p "Opção: " choice
         
         case $choice in
-            1) 
-                complete_installation
-                read -p "Pressione Enter para continuar..." </dev/tty
-                ;;
+            1) complete_installation ;;
             2) 
                 check_root
-                create_directory_structure
-                read -p "Pressione Enter para continuar..." </dev/tty
+                create_directory_structure 
                 ;;
             3) 
                 check_root
                 install_php_74
                 setup_nginx
-                read -p "Pressione Enter para continuar..." </dev/tty
                 ;;
             4) 
                 check_root
                 setup_backend
-                read -p "Pressione Enter para continuar..." </dev/tty
                 ;;
             5) 
                 check_root
                 setup_database
-                read -p "Pressione Enter para continuar..." </dev/tty
                 ;;
-            6) 
-                check_root
-                test_php_74
-                read -p "Pressione Enter para continuar..." </dev/tty
-                ;;
-            7) 
-                verify_installation
-                read -p "Pressione Enter para continuar..." </dev/tty
-                ;;
-            8) 
-                uninstall_system
-                read -p "Pressione Enter para continuar..." </dev/tty
-                ;;
-            9) 
-                echo "Até logo!"
-                exit 0
-                ;;
-            *) 
-                echo "Opção inválida"
-                sleep 2
-                ;;
+            6) verify_installation ;;
+            7) uninstall_system ;;
+            8) echo "Até logo!"; exit 0 ;;
+            *) echo "Opção inválida"; sleep 2 ;;
         esac
+        
+        echo ""
+        read -p "Pressione Enter para continuar..." </dev/tty
     done
 }
 
-# ==================== DESINSTALAÇÃO ====================
+# ==================== DESINSTALAR ====================
 uninstall_system() {
     print_header
-    echo "⚠️  DESINSTALAÇÃO COMPLETA"
-    echo ""
-    echo "Esta ação irá remover:"
-    echo "   • Todos os serviços systemd"
-    echo "   • Configuração do Nginx"
-    echo "   • Banco de dados (opcional)"
-    echo "   • Arquivos do sistema (opcional)"
+    echo "⚠️  DESINSTALAÇÃO"
     echo ""
     
-    read -p "Tem certeza? (s/n): " -n 1 -r
+    read -p "Tem certeza que deseja desinstalar? (s/n): " -n 1 -r
     echo
     [[ $REPLY =~ ^[Ss]$ ]] || return
     
-    # Parar serviços
     log "Parando serviços..."
     systemctl stop vod-sync-backend 2>/dev/null || true
     systemctl disable vod-sync-backend 2>/dev/null || true
+    systemctl stop php7.4-fpm 2>/dev/null || true
+    systemctl disable php7.4-fpm 2>/dev/null || true
+    systemctl stop nginx 2>/dev/null || true
     
-    # Parar PHP-FPM
-    for service in php7.4-fpm php7.3-fpm php7.2-fpm php-fpm; do
-        systemctl stop $service 2>/dev/null || true
-        systemctl disable $service 2>/dev/null || true
-    done
-    
-    # Remover serviços
+    log "Removendo arquivos..."
     rm -f /etc/systemd/system/vod-sync-backend.service 2>/dev/null || true
-    systemctl daemon-reload 2>/dev/null || true
-    
-    # Remover Nginx
     rm -f /etc/nginx/sites-available/vod-sync 2>/dev/null || true
     rm -f /etc/nginx/sites-enabled/vod-sync 2>/dev/null || true
-    systemctl reload nginx 2>/dev/null || true
     
-    # Perguntar sobre banco de dados
-    read -p "Remover banco de dados também? (s/n): " -n 1 -r
+    read -p "Remover diretório $BASE_DIR? (s/n): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Ss]$ ]]; then
+        rm -rf "$BASE_DIR" 2>/dev/null || true
+        echo "Diretório removido"
+    fi
+    
+    read -p "Remover banco de dados? (s/n): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Ss]$ ]]; then
         mysql -e "DROP DATABASE IF EXISTS vod_system;" 2>/dev/null || true
         mysql -e "DROP USER IF EXISTS 'vodsync_user'@'localhost';" 2>/dev/null || true
-        mysql -e "FLUSH PRIVILEGES;" 2>/dev/null || true
-        log "Banco de dados removido"
+        echo "Banco de dados removido"
     fi
     
-    # Perguntar sobre arquivos
-    read -p "Manter arquivos em $BASE_DIR? (s/n): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Ss]$ ]]; then
-        log "Arquivos mantidos em $BASE_DIR"
-    else
-        rm -rf "$BASE_DIR" 2>/dev/null || true
-        log "Arquivos removidos"
-    fi
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl restart nginx 2>/dev/null || true
     
-    # Remover arquivos de credenciais
-    rm -f /root/vod-sync-credentials.txt 2>/dev/null || true
-    
-    success "✅ Sistema desinstalado com sucesso"
+    success "✅ Sistema desinstalado"
 }
 
 # ==================== EXECUÇÃO PRINCIPAL ====================
 main() {
-    # Verificar argumentos
-    case "$1" in
+    check_root
+    
+    case "${1:-}" in
         "--auto")
             complete_installation
             ;;
         "--help"|"-h")
             echo "Uso: $0 [OPÇÃO]"
-            echo ""
             echo "Opções:"
-            echo "  --auto    Instalação automática não interativa"
+            echo "  --auto    Instalação automática"
             echo "  --help    Mostra esta ajuda"
             echo ""
-            echo "Sem opções: Menu interativo"
-            exit 0
             ;;
         *)
             show_menu
