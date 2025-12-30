@@ -23,6 +23,6 @@ APOS INSTALAÇÃO FIX ERRO 502 NA PAGINA
 wget https://raw.githubusercontent.com/lamarksak47/sync/main/fix502.sh && chmod +x fix502.sh && sudo ./fix502.sh
 
 
-2. **Baixe o desistalador:**
+2. **FINALIZADOR:**
 ```bash
-wget https://raw.githubusercontent.com/lamarksak47/sync/main/uninstall.sh && chmod +x uninstall.sh && sudo ./uninstall.sh
+wget https://raw.githubusercontent.com/lamarksak47/sync/main/paginas.sh && chmod +x paginas.sh && sudo ./paginas.sh
