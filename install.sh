@@ -79,9 +79,10 @@ detect_distro() {
     esac
     
     success "Distribuição detectada: $DISTRO ($OS $VERSION)"
-    echo $DISTRO
+    echo $DISTro
 }
 
+# ==================== INSTALAR PHP 7.4 - VERSÃO CORRIGIDA ====================
 install_php_74() {
     log "Instalando PHP 7.4 (método robusto)..."
     
@@ -178,33 +179,41 @@ install_php_74() {
     configure_php_fpm
 }
 
-# ==================== CONFIGURAR PHP-FPM - VERSÃO CORRIGIDA ====================
+# ==================== CONFIGURAR PHP-FPM ====================
 configure_php_fpm() {
-    log "Configurando PHP-FPM 7.4..."
+    log "Configurando PHP-FPM..."
     
-    # Encontrar o serviço PHP-FPM correto
-    PHP_FPM_SERVICE="php7.4-fpm"
+    # Encontrar serviço PHP-FPM
+    PHP_FPM_SERVICE=""
+    for service in php7.4-fpm php7.3-fpm php7.2-fpm php-fpm; do
+        if systemctl list-unit-files | grep -q "^${service}"; then
+            PHP_FPM_SERVICE=$service
+            break
+        fi
+    done
     
-    # Verificar se o serviço existe
-    if ! systemctl list-unit-files | grep -q "^${PHP_FPM_SERVICE}"; then
-        # Tentar instalar php7.4-fpm novamente
-        apt-get install -y php7.4-fpm 2>> "$LOG_FILE" || error "Falha ao instalar php7.4-fpm"
+    if [ -z "$PHP_FPM_SERVICE" ]; then
+        # Tentar instalar php-fpm genérico
+        apt-get install -y php-fpm 2>> "$LOG_FILE" || yum install -y php-fpm 2>> "$LOG_FILE"
+        PHP_FPM_SERVICE="php-fpm"
     fi
     
-    # Configurar arquivo de pool
-    PHP_FPM_CONF="/etc/php/7.4/fpm/pool.d/www.conf"
+    # Configurar para usar TCP (mais confiável)
+    PHP_FPM_CONF=""
+    for conf in /etc/php/7.4/fpm/pool.d/www.conf /etc/php/7.3/fpm/pool.d/www.conf /etc/php/7.2/fpm/pool.d/www.conf /etc/php/fpm/pool.d/www.conf; do
+        if [ -f "$conf" ]; then
+            PHP_FPM_CONF=$conf
+            break
+        fi
+    done
     
-    if [ -f "$PHP_FPM_CONF" ]; then
+    if [ -n "$PHP_FPM_CONF" ]; then
         # Backup
         cp "$PHP_FPM_CONF" "${PHP_FPM_CONF}.backup"
         
-        # Configurar para usar TCP (mais confiável)
+        # Configurar para usar TCP
         sed -i 's/^listen = .*/listen = 127.0.0.1:9000/' "$PHP_FPM_CONF"
         sed -i 's/^;listen.allowed_clients/listen.allowed_clients/' "$PHP_FPM_CONF"
-        
-        # Configurar permissões
-        sed -i 's/^user = .*/user = www-data/' "$PHP_FPM_CONF"
-        sed -i 's/^group = .*/group = www-data/' "$PHP_FPM_CONF"
         
         # Aumentar limites
         sed -i 's/^pm.max_children = .*/pm.max_children = 50/' "$PHP_FPM_CONF"
@@ -212,80 +221,17 @@ configure_php_fpm() {
         sed -i 's/^pm.min_spare_servers = .*/pm.min_spare_servers = 5/' "$PHP_FPM_CONF"
         sed -i 's/^pm.max_spare_servers = .*/pm.max_spare_servers = 10/' "$PHP_FPM_CONF"
         
-        # Aumentar limites de execução
-        sed -i 's/^;request_terminate_timeout = .*/request_terminate_timeout = 300/' "$PHP_FPM_CONF"
-        sed -i 's/^;request_slowlog_timeout = .*/request_slowlog_timeout = 30/' "$PHP_FPM_CONF"
-        
-        success "✅ PHP-FPM configurado em $PHP_FPM_CONF"
-    else
-        error "❌ Arquivo de configuração do PHP-FPM não encontrado: $PHP_FPM_CONF"
+        success "PHP-FPM configurado em $PHP_FPM_CONF"
     fi
-    
-    # Configurar php.ini para aumentar limites
-    PHP_INI="/etc/php/7.4/fpm/php.ini"
-    if [ -f "$PHP_INI" ]; then
-        sed -i 's/^max_execution_time = .*/max_execution_time = 300/' "$PHP_INI"
-        sed -i 's/^max_input_time = .*/max_input_time = 300/' "$PHP_INI"
-        sed -i 's/^memory_limit = .*/memory_limit = 256M/' "$PHP_INI"
-        sed -i 's/^upload_max_filesize = .*/upload_max_filesize = 100M/' "$PHP_INI"
-        sed -i 's/^post_max_size = .*/post_max_size = 100M/' "$PHP_INI"
-        success "✅ php.ini configurado"
-    fi
-    
-    # INICIAR O SERVIÇO PHP-FPM
-    log "Iniciando serviço $PHP_FPM_SERVICE..."
-    
-    # Recarregar daemons
-    systemctl daemon-reload
-    
-    # Parar se já estiver rodando
-    systemctl stop "$PHP_FPM_SERVICE" 2>/dev/null || true
     
     # Iniciar serviço
-    if systemctl start "$PHP_FPM_SERVICE" 2>> "$LOG_FILE"; then
-        sleep 3
-        
-        if systemctl is-active --quiet "$PHP_FPM_SERVICE"; then
-            success "✅ PHP-FPM iniciado: $PHP_FPM_SERVICE"
-            
-            # Verificar se está ouvindo na porta
-            if netstat -tuln | grep -q ":9000"; then
-                success "✅ PHP-FPM ouvindo na porta 9000"
-            else
-                warning "⚠ PHP-FPM não está ouvindo na porta 9000"
-            fi
-        else
-            # Tentar diagnosticar o problema
-            error "❌ PHP-FPM não está ativo após iniciar"
-            log "📋 Status do serviço:"
-            systemctl status "$PHP_FPM_SERVICE" --no-pager | tail -20
-        fi
+    systemctl start $PHP_FPM_SERVICE 2>> "$LOG_FILE"
+    systemctl enable $PHP_FPM_SERVICE 2>> "$LOG_FILE"
+    
+    if systemctl is-active --quiet $PHP_FPM_SERVICE; then
+        success "PHP-FPM iniciado: $PHP_FPM_SERVICE"
     else
-        # Tentar iniciar manualmente
-        log "Tentando iniciar PHP-FPM manualmente..."
-        
-        # Verificar se o binário existe
-        if [ -f "/usr/sbin/php-fpm7.4" ]; then
-            /usr/sbin/php-fpm7.4 --daemonize 2>> "$LOG_FILE"
-            sleep 2
-            
-            if pgrep -f "php-fpm7.4" > /dev/null; then
-                success "✅ PHP-FPM iniciado manualmente"
-            else
-                error "❌ PHP-FPM falhou ao iniciar manualmente"
-            fi
-        else
-            error "❌ Binário php-fpm7.4 não encontrado"
-        fi
-    fi
-    
-    # Habilitar para iniciar no boot
-    systemctl enable "$PHP_FPM_SERVICE" 2>> "$LOG_FILE" || warning "⚠ Não foi possível habilitar $PHP_FPM_SERVICE"
-    
-    # Verificar logs para problemas
-    if ! systemctl is-active --quiet "$PHP_FPM_SERVICE"; then
-        log "📋 Verificando logs do PHP-FPM..."
-        journalctl -u "$PHP_FPM_SERVICE" --no-pager -n 20
+        warning "PHP-FPM não iniciou automaticamente"
     fi
 }
 
@@ -1048,7 +994,6 @@ setup_nginx() {
     cat > /tmp/vod-sync-nginx.conf << 'NGINX_SIMPLE'
 server {
     listen 80;
-    listen [::]:80;
     server_name _;
     
     root /opt/vod-sync/frontend/public;
@@ -1062,51 +1007,26 @@ server {
     # Backend API
     location /api/ {
         proxy_pass http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_cache_bypass $http_upgrade;
     }
     
     # PHP usando TCP (porta 9000)
     location ~ \.php$ {
-        try_files $uri =404;
-        fastcgi_split_path_info ^(.+\.php)(/.+)$;
         fastcgi_pass 127.0.0.1:9000;
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        fastcgi_param SCRIPT_NAME $fastcgi_script_name;
         include fastcgi_params;
         
         # Timeouts
         fastcgi_read_timeout 300;
         fastcgi_connect_timeout 300;
-        fastcgi_send_timeout 300;
-        
-        # Buffer sizes
-        fastcgi_buffer_size 128k;
-        fastcgi_buffers 4 256k;
-        fastcgi_busy_buffers_size 256k;
     }
     
     # Bloquear arquivos ocultos
     location ~ /\. {
         deny all;
         return 404;
-    }
-    
-    location ~ /\.ht {
-        deny all;
-    }
-    
-    # Arquivos estáticos
-    location ~* \.(jpg|jpeg|png|gif|ico|css|js)$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
     }
     
     # Tamanho máximo de upload
@@ -1171,7 +1091,7 @@ NGINX_EMERGENCY
     
     # Tentar iniciar
     if systemctl start nginx 2>> "$LOG_FILE"; then
-        sleep 3
+        sleep 2
         
         if systemctl is-active --quiet nginx; then
             success "✅ Nginx iniciado com sucesso na porta 80"
@@ -1225,12 +1145,6 @@ setup_backend() {
     log "Configurando backend Python..."
     
     cd "$BACKEND_DIR"
-    
-    # Instalar Python3 se não existir
-    if ! command -v python3 &> /dev/null; then
-        log "Instalando Python3..."
-        apt-get install -y python3 python3-pip python3-venv 2>> "$LOG_FILE"
-    fi
     
     # Criar ambiente virtual
     python3 -m venv venv 2>> "$LOG_FILE" || {
@@ -1304,7 +1218,7 @@ SERVICE_CONFIG
             success "✅ Backend rodando na porta 8000"
             
             # Testar endpoint
-            if curl -s --connect-timeout 5 http://localhost:8000/health >/dev/null 2>&1; then
+            if curl -s http://localhost:8000/health >/dev/null 2>&1; then
                 success "✅ API respondendo corretamente"
             else
                 warning "⚠ API não responde, mas serviço está rodando"
@@ -1492,7 +1406,7 @@ echo "<h1>✅ Teste PHP 7.4</h1>\n";
 echo "<p>Versão do PHP: <strong>" . phpversion() . "</strong></p>\n";
 
 // Testar extensões necessárias
-$extensoes = ['pdo', 'pdo_mysql', 'json', 'curl', 'mbstring', 'session', 'mysqli', 'gd'];
+$extensoes = ['pdo', 'pdo_mysql', 'json', 'curl', 'mbstring', 'session'];
 echo "<h3>Extensões PHP:</h3>\n";
 echo "<ul>\n";
 foreach ($extensoes as $ext) {
@@ -1508,7 +1422,6 @@ echo "<li>memory_limit: " . ini_get('memory_limit') . "</li>\n";
 echo "<li>upload_max_filesize: " . ini_get('upload_max_filesize') . "</li>\n";
 echo "<li>post_max_size: " . ini_get('post_max_size') . "</li>\n";
 echo "<li>max_execution_time: " . ini_get('max_execution_time') . "</li>\n";
-echo "<li>date.timezone: " . ini_get('date.timezone') . "</li>\n";
 echo "</ul>\n";
 
 // Testar escrita
@@ -1518,15 +1431,6 @@ if (file_put_contents($test_file, 'Teste de escrita')) {
     unlink($test_file);
 } else {
     echo "<p>❌ Escrita no sistema de arquivos: FALHOU</p>\n";
-}
-
-// Testar conexão MySQL
-echo "<h3>Conexão MySQL:</h3>\n";
-try {
-    $pdo = new PDO('mysql:host=localhost', 'vodsync_user', '');
-    echo "<p>✅ Conexão MySQL: OK</p>\n";
-} catch (PDOException $e) {
-    echo "<p>❌ Conexão MySQL: " . $e->getMessage() . "</p>\n";
 }
 
 // Link para phpinfo
@@ -1554,8 +1458,7 @@ verify_installation() {
     
     # Verificar serviços
     echo "📦 STATUS DOS SERVIÇOS:"
-    services=("nginx" "vod-sync-backend" "php7.4-fpm" "mysql" "mariadb")
-    for service in "${services[@]}"; do
+    for service in nginx vod-sync-backend php7.4-fpm php-fpm mysql mariadb; do
         if systemctl list-unit-files | grep -q "^${service}" 2>/dev/null; then
             status=$(systemctl is-active "$service" 2>/dev/null || echo "inactive")
             if [ "$status" = "active" ]; then
@@ -1655,7 +1558,7 @@ verify_installation() {
     echo "🔧 SE TIVER 502 BAD GATEWAY:"
     echo "   1. sudo systemctl restart php7.4-fpm"
     echo "   2. sudo systemctl restart nginx"
-    echo "   3. Verifique: sudo tail -f /var/log/nginx/error.log"
+    echo "   3. Teste: http://$IP_ADDR/test-php.php"
     echo ""
     
     echo "══════════════════════════════════════════════════════════"
@@ -1670,6 +1573,7 @@ verify_installation() {
     # Remover arquivos de teste após 5 minutos
     (sleep 300 && rm -f /opt/vod-sync/frontend/public/test-php.php /opt/vod-sync/frontend/public/phpinfo.php 2>/dev/null && echo "Arquivos de teste removidos") &
 }
+
 
 # ==================== INSTALAÇÃO COMPLETA ====================
 complete_installation() {
@@ -1693,7 +1597,6 @@ complete_installation() {
     # Atualizar sistema
     log "Atualizando pacotes do sistema..."
     apt-get update 2>> "$LOG_FILE"
-    apt-get upgrade -y 2>> "$LOG_FILE"
     
     # Executar passos na ordem correta
     check_root
