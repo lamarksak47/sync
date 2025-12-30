@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================
-# INSTALADOR VOD SYNC SYSTEM - VERSÃO FINAL
+# INSTALADOR VOD SYNC SYSTEM - PHP 7.4
 # ============================================
 
 set -e
@@ -28,7 +28,7 @@ print_header() {
     clear
     echo -e "${BLUE}"
     echo "╔══════════════════════════════════════════════════════════╗"
-    echo "║     VOD SYNC SYSTEM - INSTALADOR DEFINITIVO v2.0        ║"
+    echo "║     VOD SYNC SYSTEM - INSTALADOR PHP 7.4 COMPATÍVEL     ║"
     echo "╚══════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     echo "📝 Log: $LOG_FILE"
@@ -53,7 +53,157 @@ error() {
     exit 1
 }
 
-# Verificar root
+# ==================== DETECTAR DISTRIBUIÇÃO ====================
+detect_distro() {
+    log "Detectando distribuição..."
+    
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+        VERSION=$VERSION_ID
+        echo "Distribuição: $OS $VERSION"
+    else
+        OS=$(uname -s)
+    fi
+    
+    case $OS in
+        ubuntu|debian)
+            DISTRO="debian"
+            ;;
+        centos|rhel|fedora|rocky|almalinux)
+            DISTRO="rhel"
+            ;;
+        *)
+            DISTRO="unknown"
+            ;;
+    esac
+    
+    success "Distribuição detectada: $DISTRO ($OS $VERSION)"
+    echo $DISTro
+}
+
+# ==================== INSTALAR PHP 7.4 ====================
+install_php_74() {
+    log "Instalando PHP 7.4..."
+    
+    DISTRO=$(detect_distro)
+    
+    case $DISTRO in
+        debian)
+            # Ubuntu/Debian
+            if grep -q "Ubuntu 20.04\|Ubuntu 18.04" /etc/os-release; then
+                # Ubuntu 20.04/18.04 tem PHP 7.4 no repositório padrão
+                apt-get update
+                apt-get install -y software-properties-common
+                apt-get install -y php7.4 php7.4-fpm php7.4-mysql php7.4-curl \
+                                  php7.4-json php7.4-mbstring php7.4-xml php7.4-zip
+            else
+                # Ubuntu/Debian mais novos - adicionar repositório
+                apt-get update
+                apt-get install -y software-properties-common
+                add-apt-repository -y ppa:ondrej/php
+                apt-get update
+                apt-get install -y php7.4 php7.4-fpm php7.4-mysql php7.4-curl \
+                                  php7.4-json php7.4-mbstring php7.4-xml php7.4-zip
+            fi
+            ;;
+        rhel)
+            # CentOS/RHEL/Fedora
+            if command -v dnf &> /dev/null; then
+                # Fedora
+                dnf install -y https://rpms.remirepo.net/fedora/remi-release-$(rpm -E %fedora).rpm
+                dnf module reset php -y
+                dnf module install php:remi-7.4 -y
+                dnf install -y php php-fpm php-mysqlnd php-curl php-json php-mbstring
+            elif command -v yum &> /dev/null; then
+                # CentOS/RHEL 7/8
+                yum install -y epel-release yum-utils
+                yum install -y http://rpms.remirepo.net/enterprise/remi-release-7.rpm
+                yum-config-manager --enable remi-php74
+                yum install -y php php-fpm php-mysqlnd php-curl php-json php-mbstring
+            fi
+            ;;
+        *)
+            error "Distribuição não suportada: $OS"
+            ;;
+    esac
+    
+    # Verificar instalação
+    if command -v php7.4 &> /dev/null; then
+        PHP_BIN="php7.4"
+    elif command -v php &> /dev/null; then
+        PHP_BIN="php"
+        PHP_VERSION=$(php -v | head -1 | cut -d' ' -f2 | cut -d'.' -f1,2)
+        if [ "$PHP_VERSION" != "7.4" ]; then
+            warning "PHP $PHP_VERSION instalado (não 7.4). Pode funcionar."
+        fi
+    else
+        error "PHP não foi instalado"
+    fi
+    
+    success "PHP instalado: $($PHP_BIN -v | head -1)"
+    
+    # Configurar PHP-FPM
+    configure_php_fpm
+}
+
+# ==================== CONFIGURAR PHP-FPM ====================
+configure_php_fpm() {
+    log "Configurando PHP-FPM..."
+    
+    # Encontrar serviço PHP-FPM
+    PHP_FPM_SERVICE=""
+    for service in php7.4-fpm php7.3-fpm php7.2-fpm php-fpm; do
+        if systemctl list-unit-files | grep -q "^${service}"; then
+            PHP_FPM_SERVICE=$service
+            break
+        fi
+    done
+    
+    if [ -z "$PHP_FPM_SERVICE" ]; then
+        # Tentar instalar php-fpm genérico
+        apt-get install -y php-fpm 2>> "$LOG_FILE" || yum install -y php-fpm 2>> "$LOG_FILE"
+        PHP_FPM_SERVICE="php-fpm"
+    fi
+    
+    # Configurar para usar TCP (mais confiável)
+    PHP_FPM_CONF=""
+    for conf in /etc/php/7.4/fpm/pool.d/www.conf /etc/php/7.3/fpm/pool.d/www.conf /etc/php/7.2/fpm/pool.d/www.conf /etc/php/fpm/pool.d/www.conf; do
+        if [ -f "$conf" ]; then
+            PHP_FPM_CONF=$conf
+            break
+        fi
+    done
+    
+    if [ -n "$PHP_FPM_CONF" ]; then
+        # Backup
+        cp "$PHP_FPM_CONF" "${PHP_FPM_CONF}.backup"
+        
+        # Configurar para usar TCP
+        sed -i 's/^listen = .*/listen = 127.0.0.1:9000/' "$PHP_FPM_CONF"
+        sed -i 's/^;listen.allowed_clients/listen.allowed_clients/' "$PHP_FPM_CONF"
+        
+        # Aumentar limites
+        sed -i 's/^pm.max_children = .*/pm.max_children = 50/' "$PHP_FPM_CONF"
+        sed -i 's/^pm.start_servers = .*/pm.start_servers = 5/' "$PHP_FPM_CONF"
+        sed -i 's/^pm.min_spare_servers = .*/pm.min_spare_servers = 5/' "$PHP_FPM_CONF"
+        sed -i 's/^pm.max_spare_servers = .*/pm.max_spare_servers = 10/' "$PHP_FPM_CONF"
+        
+        success "PHP-FPM configurado em $PHP_FPM_CONF"
+    fi
+    
+    # Iniciar serviço
+    systemctl start $PHP_FPM_SERVICE 2>> "$LOG_FILE"
+    systemctl enable $PHP_FPM_SERVICE 2>> "$LOG_FILE"
+    
+    if systemctl is-active --quiet $PHP_FPM_SERVICE; then
+        success "PHP-FPM iniciado: $PHP_FPM_SERVICE"
+    else
+        warning "PHP-FPM não iniciou automaticamente"
+    fi
+}
+
+# ==================== VERIFICAR ROOT ====================
 check_root() {
     if [ "$EUID" -ne 0 ]; then 
         error "Execute como root: sudo $0"
@@ -61,7 +211,7 @@ check_root() {
     success "Privilégios root verificados"
 }
 
-# ==================== CRIAÇÃO DE DIRETÓRIOS ====================
+# ==================== CRIAR DIRETÓRIOS ====================
 create_directory_structure() {
     log "Criando estrutura completa de diretórios..."
     
@@ -90,10 +240,6 @@ create_directory_structure() {
     find "$BACKEND_DIR/app" -type d -exec touch {}/__init__.py \;
     
     success "✅ Estrutura criada em $BASE_DIR"
-    
-    # Listar estrutura criada
-    echo "📁 Estrutura criada:"
-    tree -L 3 "$BASE_DIR" | head -30
 }
 
 # ==================== ARQUIVOS BACKEND ====================
@@ -248,21 +394,41 @@ EOF
     success "✅ Arquivos do backend criados"
 }
 
-# ==================== ARQUIVOS FRONTEND ====================
+# ==================== ARQUIVOS FRONTEND PHP 7.4 COMPATÍVEL ====================
 create_frontend_files() {
-    log "Criando arquivos do frontend PHP..."
+    log "Criando arquivos do frontend PHP 7.4 compatível..."
     
-    # index.php principal
+    # index.php principal (compatível com PHP 7.4)
     cat > "$FRONTEND_DIR/public/index.php" << 'EOF'
 <?php
 /**
- * VOD Sync System - Frontend
+ * VOD Sync System - Frontend (PHP 7.4+ Compatível)
  */
 session_start();
 
+// Configurações para PHP 7.4
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+ini_set('log_errors', 1);
+
 // Verificar se API está online
 $api_url = 'http://localhost:8000/health';
-$api_online = @file_get_contents($api_url, false, stream_context_create(['http' => ['timeout' => 2]]));
+$api_online = false;
+
+$context = stream_context_create([
+    'http' => [
+        'timeout' => 3,
+        'ignore_errors' => true
+    ]
+]);
+
+try {
+    $response = @file_get_contents($api_url, false, $context);
+    $api_online = ($response !== false);
+} catch (Exception $e) {
+    $api_online = false;
+}
+
 $api_status = $api_online ? 'online' : 'offline';
 ?>
 <!DOCTYPE html>
@@ -286,46 +452,59 @@ $api_status = $api_online ? 'online' : 'offline';
             align-items: center;
             justify-content: center;
             padding: 20px;
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
         }
         .main-card {
             background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
             overflow: hidden;
-            max-width: 1200px;
+            max-width: 1000px;
             width: 100%;
         }
         .sidebar {
             background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
             color: white;
-            padding: 40px 30px;
-            min-height: 500px;
+            padding: 30px 20px;
+            min-height: 400px;
         }
         .content {
-            padding: 40px;
+            padding: 30px;
         }
         .status-badge {
-            padding: 8px 16px;
+            padding: 6px 12px;
             border-radius: 20px;
-            font-size: 14px;
+            font-size: 12px;
             font-weight: 600;
+            display: inline-block;
         }
         .status-online { background: #10b981; color: white; }
         .status-offline { background: #ef4444; color: white; }
         .feature-card {
             border: 1px solid #e5e7eb;
-            border-radius: 10px;
-            padding: 20px;
-            margin-bottom: 20px;
-            transition: all 0.3s;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            transition: all 0.2s;
+            background: #f9fafb;
         }
         .feature-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+            transform: translateY(-3px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
         }
         .login-form {
-            max-width: 400px;
+            max-width: 350px;
             margin: 0 auto;
+        }
+        @media (max-width: 768px) {
+            .sidebar {
+                min-height: auto;
+                padding: 20px;
+            }
+            .main-card {
+                margin: 10px;
+            }
         }
     </style>
 </head>
@@ -333,40 +512,39 @@ $api_status = $api_online ? 'online' : 'offline';
     <div class="main-card">
         <div class="row g-0">
             <!-- Sidebar -->
-            <div class="col-lg-4">
+            <div class="col-lg-4 col-md-5">
                 <div class="sidebar">
-                    <div class="text-center mb-5">
-                        <i class="fas fa-sync-alt fa-4x mb-3"></i>
-                        <h1>VOD Sync</h1>
-                        <p class="opacity-75">Sistema Profissional de Sincronização VOD</p>
+                    <div class="text-center mb-4">
+                        <i class="fas fa-sync-alt fa-3x mb-3"></i>
+                        <h3>VOD Sync</h3>
+                        <p class="opacity-75 small">Sistema de Sincronização VOD</p>
                     </div>
                     
-                    <div class="mb-5">
-                        <h5><i class="fas fa-check-circle me-2"></i>Funcionalidades</h5>
-                        <ul class="list-unstyled">
-                            <li class="mb-2"><i class="fas fa-server me-2"></i>Conexão XUI One</li>
-                            <li class="mb-2"><i class="fas fa-list me-2"></i>Listas M3U</li>
-                            <li class="mb-2"><i class="fas fa-film me-2"></i>Sincronização Automática</li>
-                            <li class="mb-2"><i class="fas fa-database me-2"></i>Enriquecimento TMDb</li>
-                            <li class="mb-2"><i class="fas fa-users me-2"></i>Multi-usuário</li>
-                            <li><i class="fas fa-chart-line me-2"></i>Dashboard em Tempo Real</li>
+                    <div class="mb-4">
+                        <h6><i class="fas fa-check-circle me-2"></i>Funcionalidades</h6>
+                        <ul class="list-unstyled small">
+                            <li class="mb-1"><i class="fas fa-server me-2"></i>Conexão XUI One</li>
+                            <li class="mb-1"><i class="fas fa-list me-2"></i>Listas M3U</li>
+                            <li class="mb-1"><i class="fas fa-film me-2"></i>Sincronização Automática</li>
+                            <li class="mb-1"><i class="fas fa-database me-2"></i>Enriquecimento TMDb</li>
+                            <li><i class="fas fa-users me-2"></i>Multi-usuário</li>
                         </ul>
                     </div>
                     
                     <div class="system-status">
-                        <h5><i class="fas fa-heartbeat me-2"></i>Status do Sistema</h5>
-                        <div class="d-flex justify-content-between mb-2">
-                            <span>Backend API:</span>
+                        <h6><i class="fas fa-heartbeat me-2"></i>Status do Sistema</h6>
+                        <div class="d-flex justify-content-between mb-1">
+                            <span class="small">Backend API:</span>
                             <span class="status-badge status-<?php echo $api_status; ?>">
                                 <?php echo strtoupper($api_status); ?>
                             </span>
                         </div>
-                        <div class="d-flex justify-content-between mb-2">
-                            <span>Banco de Dados:</span>
+                        <div class="d-flex justify-content-between mb-1">
+                            <span class="small">Banco de Dados:</span>
                             <span class="status-badge status-online">ONLINE</span>
                         </div>
                         <div class="d-flex justify-content-between">
-                            <span>Frontend:</span>
+                            <span class="small">Frontend:</span>
                             <span class="status-badge status-online">ONLINE</span>
                         </div>
                     </div>
@@ -374,23 +552,26 @@ $api_status = $api_online ? 'online' : 'offline';
             </div>
             
             <!-- Conteúdo Principal -->
-            <div class="col-lg-8">
+            <div class="col-lg-8 col-md-7">
                 <div class="content">
-                    <h2 class="mb-4">Bem-vindo ao VOD Sync System</h2>
-                    <p class="text-muted mb-5">Sistema completo para sincronização de conteúdos VOD com XUI One</p>
+                    <h2 class="mb-3">Bem-vindo ao VOD Sync</h2>
+                    <p class="text-muted mb-4">Sistema completo para sincronização de conteúdos VOD</p>
                     
                     <!-- Formulário de Login -->
                     <div class="login-form">
-                        <h4 class="mb-4"><i class="fas fa-sign-in-alt me-2"></i>Acesso ao Sistema</h4>
+                        <h5 class="mb-3"><i class="fas fa-sign-in-alt me-2"></i>Acesso ao Sistema</h5>
                         
                         <?php if(isset($_GET['error'])): ?>
-                        <div class="alert alert-danger">Credenciais inválidas</div>
+                        <div class="alert alert-danger alert-dismissible fade show small" role="alert">
+                            Credenciais inválidas
+                            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                        </div>
                         <?php endif; ?>
                         
                         <form action="/login.php" method="POST">
                             <div class="mb-3">
-                                <label class="form-label">Usuário</label>
-                                <div class="input-group">
+                                <label class="form-label small">Usuário</label>
+                                <div class="input-group input-group-sm">
                                     <span class="input-group-text"><i class="fas fa-user"></i></span>
                                     <input type="text" class="form-control" name="username" 
                                            placeholder="admin" required autofocus>
@@ -398,8 +579,8 @@ $api_status = $api_online ? 'online' : 'offline';
                             </div>
                             
                             <div class="mb-3">
-                                <label class="form-label">Senha</label>
-                                <div class="input-group">
+                                <label class="form-label small">Senha</label>
+                                <div class="input-group input-group-sm">
                                     <span class="input-group-text"><i class="fas fa-lock"></i></span>
                                     <input type="password" class="form-control" name="password" 
                                            placeholder="••••••••" required>
@@ -411,50 +592,49 @@ $api_status = $api_online ? 'online' : 'offline';
                             
                             <div class="mb-3 form-check">
                                 <input type="checkbox" class="form-check-input" id="remember">
-                                <label class="form-check-label" for="remember">Lembrar-me</label>
+                                <label class="form-check-label small" for="remember">Lembrar-me</label>
                             </div>
                             
                             <button type="submit" class="btn btn-primary w-100 py-2">
-                                <i class="fas fa-sign-in-alt me-2"></i>Entrar no Sistema
+                                <i class="fas fa-sign-in-alt me-2"></i>Entrar
                             </button>
                         </form>
                         
-                        <div class="text-center mt-4">
-                            <p class="small text-muted">
+                        <div class="text-center mt-3">
+                            <p class="small text-muted mb-0">
                                 <i class="fas fa-info-circle me-1"></i>
-                                Primeiro acesso? Use:<br>
-                                <strong>Usuário:</strong> admin | <strong>Senha:</strong> admin123
+                                Primeiro acesso: <strong>admin</strong> / <strong>admin123</strong>
                             </p>
                         </div>
                     </div>
                     
-                    <hr class="my-5">
+                    <hr class="my-4">
                     
                     <!-- Recursos do Sistema -->
-                    <h4 class="mb-4"><i class="fas fa-rocket me-2"></i>Recursos Principais</h4>
+                    <h5 class="mb-3"><i class="fas fa-rocket me-2"></i>Recursos Principais</h5>
                     <div class="row">
-                        <div class="col-md-6">
+                        <div class="col-sm-6">
                             <div class="feature-card">
-                                <h5><i class="fas fa-sync-alt text-primary me-2"></i>Sincronização</h5>
-                                <p class="text-muted small">Sincronização automática de filmes e séries com XUI One</p>
+                                <h6><i class="fas fa-sync-alt text-primary me-2"></i>Sincronização</h6>
+                                <p class="text-muted small mb-0">Sincronização automática com XUI One</p>
                             </div>
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-sm-6">
                             <div class="feature-card">
-                                <h5><i class="fas fa-database text-success me-2"></i>TMDb</h5>
-                                <p class="text-muted small">Enriquecimento automático de metadados em português</p>
+                                <h6><i class="fas fa-database text-success me-2"></i>TMDb</h6>
+                                <p class="text-muted small mb-0">Metadados em português automaticamente</p>
                             </div>
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-sm-6">
                             <div class="feature-card">
-                                <h5><i class="fas fa-users-cog text-warning me-2"></i>Multi-usuário</h5>
-                                <p class="text-muted small">Hierarquia: Admin, Revendedor e Usuário final</p>
+                                <h6><i class="fas fa-users-cog text-warning me-2"></i>Multi-usuário</h6>
+                                <p class="text-muted small mb-0">Admin, Revendedor e Usuário</p>
                             </div>
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-sm-6">
                             <div class="feature-card">
-                                <h5><i class="fas fa-shield-alt text-danger me-2"></i>Segurança</h5>
-                                <p class="text-muted small">Sistema de licenças e autenticação JWT</p>
+                                <h6><i class="fas fa-shield-alt text-danger me-2"></i>Segurança</h6>
+                                <p class="text-muted small mb-0">Licenças e autenticação JWT</p>
                             </div>
                         </div>
                     </div>
@@ -472,34 +652,20 @@ $api_status = $api_online ? 'online' : 'offline';
             password.setAttribute('type', type);
             this.innerHTML = type === 'password' ? '<i class="fas fa-eye"></i>' : '<i class="fas fa-eye-slash"></i>';
         });
-        
-        // Verificar API periodicamente
-        setInterval(() => {
-            fetch('http://localhost:8000/health')
-                .then(response => {
-                    const badge = document.querySelector('.status-badge.status-online, .status-badge.status-offline');
-                    badge.className = 'status-badge status-online';
-                    badge.textContent = 'ONLINE';
-                })
-                .catch(() => {
-                    const badge = document.querySelector('.status-badge.status-online, .status-badge.status-offline');
-                    badge.className = 'status-badge status-offline';
-                    badge.textContent = 'OFFLINE';
-                });
-        }, 30000);
     </script>
 </body>
 </html>
 EOF
 
-    # login.php
+    # login.php compatível
     cat > "$FRONTEND_DIR/public/login.php" << 'EOF'
 <?php
 session_start();
 
+// Compatibilidade PHP 7.4
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $username = $_POST['username'] ?? '';
-    $password = $_POST['password'] ?? '';
+    $username = isset($_POST['username']) ? $_POST['username'] : '';
+    $password = isset($_POST['password']) ? $_POST['password'] : '';
     
     // Credenciais padrão (em produção, usar banco de dados)
     $valid_credentials = [
@@ -516,17 +682,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         // Redirecionar para dashboard
         header('Location: /dashboard.php');
-        exit;
+        exit();
     } else {
         // Credenciais inválidas
         header('Location: /?error=1');
-        exit;
+        exit();
     }
 }
 
 // Se não for POST, redirecionar para index
 header('Location: /');
-exit;
+exit();
 EOF
 
     # dashboard.php básico
@@ -535,7 +701,7 @@ EOF
 session_start();
 if (!isset($_SESSION['user_id'])) {
     header('Location: /');
-    exit;
+    exit();
 }
 ?>
 <!DOCTYPE html>
@@ -547,104 +713,205 @@ if (!isset($_SESSION['user_id'])) {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <style>
-        .sidebar {
-            background: #2c3e50;
-            color: white;
-            height: 100vh;
-            position: fixed;
-            left: 0;
-            top: 0;
-            width: 250px;
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f8f9fa;
         }
-        .main-content {
-            margin-left: 250px;
-            padding: 20px;
+        .navbar {
+            background: #2c3e50;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
         .stat-card {
             background: white;
-            border-radius: 10px;
-            padding: 20px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+            transition: all 0.2s;
+        }
+        .stat-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        .sidebar {
+            background: #34495e;
+            color: white;
+            min-height: 100vh;
+            padding: 0;
+        }
+        .sidebar .nav-link {
+            color: rgba(255,255,255,0.8);
+            padding: 10px 15px;
+            border-left: 3px solid transparent;
+        }
+        .sidebar .nav-link:hover,
+        .sidebar .nav-link.active {
+            color: white;
+            background: rgba(255,255,255,0.1);
+            border-left-color: #3498db;
+        }
+        @media (max-width: 768px) {
+            .sidebar {
+                min-height: auto;
+            }
         }
     </style>
 </head>
 <body>
-    <!-- Sidebar -->
-    <div class="sidebar">
-        <div class="p-4">
-            <h4><i class="fas fa-sync-alt"></i> VOD Sync</h4>
-            <p class="text-muted small">Olá, <?php echo $_SESSION['username']; ?></p>
+    <!-- Navbar -->
+    <nav class="navbar navbar-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/dashboard.php">
+                <i class="fas fa-sync-alt me-2"></i>VOD Sync Dashboard
+            </a>
+            <span class="navbar-text">
+                <i class="fas fa-user me-1"></i><?php echo htmlspecialchars($_SESSION['username']); ?>
+            </span>
         </div>
-        <nav class="nav flex-column px-3">
-            <a href="/dashboard.php" class="nav-link text-white active">
-                <i class="fas fa-tachometer-alt me-2"></i> Dashboard
-            </a>
-            <a href="/xui.php" class="nav-link text-white">
-                <i class="fas fa-server me-2"></i> Conexões XUI
-            </a>
-            <a href="/m3u.php" class="nav-link text-white">
-                <i class="fas fa-list me-2"></i> Listas M3U
-            </a>
-            <a href="/sync.php" class="nav-link text-white">
-                <i class="fas fa-sync me-2"></i> Sincronização
-            </a>
-            <a href="/logs.php" class="nav-link text-white">
-                <i class="fas fa-clipboard-list me-2"></i> Logs
-            </a>
-            <a href="/logout.php" class="nav-link text-danger mt-5">
-                <i class="fas fa-sign-out-alt me-2"></i> Sair
-            </a>
-        </nav>
+    </nav>
+    
+    <div class="container-fluid">
+        <div class="row">
+            <!-- Sidebar -->
+            <div class="col-md-3 col-lg-2 sidebar">
+                <div class="p-3">
+                    <h6 class="text-uppercase text-muted small">Menu Principal</h6>
+                </div>
+                <nav class="nav flex-column">
+                    <a href="/dashboard.php" class="nav-link active">
+                        <i class="fas fa-tachometer-alt me-2"></i> Dashboard
+                    </a>
+                    <a href="/xui.php" class="nav-link">
+                        <i class="fas fa-server me-2"></i> Conexões XUI
+                    </a>
+                    <a href="/m3u.php" class="nav-link">
+                        <i class="fas fa-list me-2"></i> Listas M3U
+                    </a>
+                    <a href="/movies.php" class="nav-link">
+                        <i class="fas fa-film me-2"></i> Filmes
+                    </a>
+                    <a href="/series.php" class="nav-link">
+                        <i class="fas fa-tv me-2"></i> Séries
+                    </a>
+                    <a href="/sync.php" class="nav-link">
+                        <i class="fas fa-sync me-2"></i> Sincronização
+                    </a>
+                    <a href="/logs.php" class="nav-link">
+                        <i class="fas fa-clipboard-list me-2"></i> Logs
+                    </a>
+                    <a href="/logout.php" class="nav-link text-danger mt-4">
+                        <i class="fas fa-sign-out-alt me-2"></i> Sair
+                    </a>
+                </nav>
+            </div>
+            
+            <!-- Conteúdo Principal -->
+            <div class="col-md-9 col-lg-10 p-4">
+                <h3 class="mb-4">Dashboard do Sistema</h3>
+                
+                <!-- Cards de Estatísticas -->
+                <div class="row">
+                    <div class="col-sm-6 col-md-3">
+                        <div class="stat-card">
+                            <h6 class="text-muted mb-2">Conexões XUI</h6>
+                            <h3 class="mb-0">0</h3>
+                            <small class="text-muted">Nenhuma configurada</small>
+                        </div>
+                    </div>
+                    <div class="col-sm-6 col-md-3">
+                        <div class="stat-card">
+                            <h6 class="text-muted mb-2">Listas M3U</h6>
+                            <h3 class="mb-0">0</h3>
+                            <small class="text-muted">Nenhuma carregada</small>
+                        </div>
+                    </div>
+                    <div class="col-sm-6 col-md-3">
+                        <div class="stat-card">
+                            <h6 class="text-muted mb-2">Filmes</h6>
+                            <h3 class="mb-0">0</h3>
+                            <small class="text-muted">Não sincronizados</small>
+                        </div>
+                    </div>
+                    <div class="col-sm-6 col-md-3">
+                        <div class="stat-card">
+                            <h6 class="text-muted mb-2">Séries</h6>
+                            <h3 class="mb-0">0</h3>
+                            <small class="text-muted">Não sincronizadas</small>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Ações Rápidas -->
+                <div class="row mt-4">
+                    <div class="col-md-12">
+                        <div class="card">
+                            <div class="card-body">
+                                <h5 class="card-title"><i class="fas fa-bolt me-2"></i>Ações Rápidas</h5>
+                                <div class="row">
+                                    <div class="col-md-4 mb-2">
+                                        <a href="/xui.php?action=add" class="btn btn-outline-primary w-100">
+                                            <i class="fas fa-plus-circle me-2"></i>Nova Conexão XUI
+                                        </a>
+                                    </div>
+                                    <div class="col-md-4 mb-2">
+                                        <a href="/m3u.php?action=add" class="btn btn-outline-primary w-100">
+                                            <i class="fas fa-plus-circle me-2"></i>Nova Lista M3U
+                                        </a>
+                                    </div>
+                                    <div class="col-md-4 mb-2">
+                                        <a href="/sync.php?action=start" class="btn btn-success w-100">
+                                            <i class="fas fa-play me-2"></i>Iniciar Sincronização
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Status do Sistema -->
+                <div class="row mt-4">
+                    <div class="col-md-12">
+                        <div class="card">
+                            <div class="card-body">
+                                <h5 class="card-title"><i class="fas fa-info-circle me-2"></i>Status do Sistema</h5>
+                                <table class="table table-sm">
+                                    <tr>
+                                        <td>Backend API</td>
+                                        <td><span class="badge bg-success">Online</span></td>
+                                        <td>http://localhost:8000</td>
+                                    </tr>
+                                    <tr>
+                                        <td>Banco de Dados</td>
+                                        <td><span class="badge bg-success">Conectado</span></td>
+                                        <td>MySQL/MariaDB</td>
+                                    </tr>
+                                    <tr>
+                                        <td>Frontend</td>
+                                        <td><span class="badge bg-success">Online</span></td>
+                                        <td>PHP <?php echo phpversion(); ?></td>
+                                    </tr>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
     
-    <!-- Main Content -->
-    <div class="main-content">
-        <h1 class="mb-4">Dashboard do Sistema</h1>
-        
-        <div class="row">
-            <div class="col-md-3">
-                <div class="stat-card">
-                    <h6>Conexões XUI</h6>
-                    <h2>0</h2>
-                    <small class="text-muted">Nenhuma configurada</small>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="stat-card">
-                    <h6>Listas M3U</h6>
-                    <h2>0</h2>
-                    <small class="text-muted">Nenhuma carregada</small>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="stat-card">
-                    <h6>Filmes</h6>
-                    <h2>0</h2>
-                    <small class="text-muted">Não sincronizados</small>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="stat-card">
-                    <h6>Séries</h6>
-                    <h2>0</h2>
-                    <small class="text-muted">Não sincronizadas</small>
-                </div>
-            </div>
-        </div>
-        
-        <div class="alert alert-info mt-4">
-            <h5><i class="fas fa-info-circle me-2"></i>Próximos Passos</h5>
-            <ol class="mb-0">
-                <li>Configure uma conexão XUI One</li>
-                <li>Adicione uma lista M3U</li>
-                <li>Escaneie os conteúdos</li>
-                <li>Inicie a sincronização</li>
-            </ol>
-        </div>
-    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
+EOF
+
+    # logout.php
+    cat > "$FRONTEND_DIR/public/logout.php" << 'EOF'
+<?php
+session_start();
+session_destroy();
+header('Location: /');
+exit();
 EOF
 
     # Configuração PHP
@@ -659,12 +926,12 @@ return [
 ];
 EOF
 
-    success "✅ Arquivos do frontend criados"
+    success "✅ Arquivos do frontend criados (PHP 7.4 compatível)"
 }
 
-# ==================== CONFIGURAÇÃO NGINX CORRIGIDA ====================
+# ==================== CONFIGURAR NGINX PHP 7.4 ====================
 setup_nginx() {
-    log "Configurando Nginx..."
+    log "Configurando Nginx para PHP 7.4..."
     
     # Instalar Nginx se necessário
     if ! command -v nginx &> /dev/null; then
@@ -673,16 +940,10 @@ setup_nginx() {
         apt-get install -y nginx 2>> "$LOG_FILE" || error "Falha ao instalar Nginx"
     fi
     
-    # Instalar PHP se necessário
-    if ! command -v php &> /dev/null; then
-        log "Instalando PHP..."
-        apt-get install -y php-fpm php-mysql php-curl php-json php-mbstring php-xml 2>> "$LOG_FILE"
-    fi
-    
     # Parar Nginx temporariamente
     systemctl stop nginx 2>/dev/null || true
     
-    # Criar configuração Nginx CORRIGIDA (sem try_files duplicado)
+    # Criar configuração Nginx otimizada para PHP 7.4
     cat > /etc/nginx/sites-available/vod-sync << 'NGINX_CONFIG'
 server {
     listen 80;
@@ -692,9 +953,12 @@ server {
     root /opt/vod-sync/frontend/public;
     index index.php index.html index.htm;
     
+    # Logs detalhados para debug
+    error_log /var/log/nginx/vod-sync-debug.log;
+    
     # Frontend
     location / {
-        try_files $uri $uri/ /index.php$is_args$args;
+        try_files $uri $uri/ /index.php?$query_string;
     }
     
     # Backend API
@@ -708,42 +972,33 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        
-        proxy_connect_timeout 300s;
-        proxy_send_timeout 300s;
-        proxy_read_timeout 300s;
     }
     
-    # PHP-FPM - CONFIGURAÇÃO CORRETA
+    # PHP-FPM - Configuração para PHP 7.4 (TCP - mais confiável)
     location ~ \.php$ {
-        include snippets/fastcgi-php.conf;
-        
-        # Determinar socket PHP automaticamente
-        set $php_socket "unix:/var/run/php/php8.2-fpm.sock";
-        
-        if (!-f $php_socket) {
-            set $php_socket "unix:/var/run/php/php8.1-fpm.sock";
-        }
-        if (!-f $php_socket) {
-            set $php_socket "unix:/var/run/php/php8.0-fpm.sock";
-        }
-        if (!-f $php_socket) {
-            set $php_socket "unix:/run/php/php7.4-fpm.sock";
-        }
-        if (!-f $php_socket) {
-            set $php_socket "127.0.0.1:9000";
-        }
-        
-        fastcgi_pass $php_socket;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        # Configuração básica obrigatória
         include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         
+        # Usar TCP (porta 9000) - funciona sempre
+        fastcgi_pass 127.0.0.1:9000;
+        
+        # Fallback para socket se disponível
+        fastcgi_pass unix:/run/php/php7.4-fpm.sock;
+        fastcgi_pass unix:/var/run/php/php7.4-fpm.sock;
+        
+        # Timeouts generosos
         fastcgi_read_timeout 300;
+        fastcgi_connect_timeout 300;
         fastcgi_send_timeout 300;
+        
+        # Headers para debug
+        add_header X-PHP-FPM "php7.4";
+        add_header X-FCGI-Pass $fastcgi_pass;
     }
     
     # Bloquear acesso a arquivos sensíveis
-    location ~ /\.(?!well-known).* {
+    location ~ /\. {
         deny all;
         return 404;
     }
@@ -760,8 +1015,13 @@ server {
         access_log off;
     }
     
-    # Tamanho máximo de upload
+    # Tamanho máximo de upload (para listas M3U grandes)
     client_max_body_size 100M;
+    
+    # Headers de segurança
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
 }
 NGINX_CONFIG
     
@@ -776,11 +1036,7 @@ NGINX_CONFIG
     if nginx -t 2>> "$LOG_FILE"; then
         success "✅ Configuração Nginx válida"
     else
-        # Backup do erro
-        nginx -t 2>&1 >> "$LOG_FILE"
-        warning "Configuração Nginx com problemas, tentando alternativa..."
-        
-        # Configuração alternativa mais simples
+        # Configuração alternativa ultra simples
         cat > /etc/nginx/sites-available/vod-sync << 'NGINX_SIMPLE'
 server {
     listen 80;
@@ -792,14 +1048,9 @@ server {
         try_files $uri $uri/ /index.php?$query_string;
     }
     
-    location /api {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-    }
-    
     location ~ \.php$ {
         include fastcgi_params;
-        fastcgi_pass unix:/var/run/php/php-fpm.sock;
+        fastcgi_pass 127.0.0.1:9000;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
     }
 }
@@ -807,18 +1058,6 @@ NGINX_SIMPLE
         
         nginx -t 2>> "$LOG_FILE" || error "Configuração Nginx ainda falha"
     fi
-    
-    # Iniciar serviços
-    log "Iniciando serviços..."
-    
-    # Iniciar PHP-FPM
-    for service in php8.2-fpm php8.1-fpm php8.0-fpm php7.4-fpm php-fpm; do
-        if systemctl list-unit-files | grep -q "^${service}"; then
-            systemctl start "$service" 2>/dev/null || true
-            systemctl enable "$service" 2>/dev/null || true
-            break
-        fi
-    done
     
     # Iniciar Nginx
     systemctl start nginx 2>> "$LOG_FILE" || error "Falha ao iniciar Nginx"
@@ -833,7 +1072,7 @@ NGINX_SIMPLE
     fi
 }
 
-# ==================== CONFIGURAÇÃO BACKEND ====================
+# ==================== CONFIGURAR BACKEND ====================
 setup_backend() {
     log "Configurando backend Python..."
     
@@ -866,7 +1105,7 @@ setup_backend() {
     chmod -R 755 "$BACKEND_DIR"
     chmod +x "$BACKEND_DIR/start.sh"
     
-    # Criar serviço systemd CORRETO
+    # Criar serviço systemd
     cat > /etc/systemd/system/vod-sync-backend.service << 'SERVICE_CONFIG'
 [Unit]
 Description=VOD Sync System Backend API
@@ -922,15 +1161,9 @@ SERVICE_CONFIG
     else
         error "❌ Falha ao iniciar serviço backend"
     fi
-    
-    # Mostrar logs se falhar
-    if ! systemctl is-active --quiet vod-sync-backend; then
-        log "📋 Últimos logs do backend:"
-        journalctl -u vod-sync-backend -n 20 --no-pager
-    fi
 }
 
-# ==================== CONFIGURAÇÃO BANCO DE DADOS ====================
+# ==================== CONFIGURAR BANCO DE DADOS ====================
 setup_database() {
     log "Configurando banco de dados..."
     
@@ -946,6 +1179,7 @@ setup_database() {
     # Instalar se necessário
     if [ -z "$MYSQL_SERVICE" ]; then
         log "Instalando MySQL..."
+        apt-get update
         apt-get install -y mysql-server 2>> "$LOG_FILE" || error "Falha ao instalar MySQL"
         MYSQL_SERVICE="mysql"
     fi
@@ -1042,7 +1276,7 @@ SQL_SCHEMA
     # Salvar credenciais
     cat > /root/vod-sync-credentials.txt << CREDENTIALS
 ============================================
-CREDENCIAIS VOD SYNC SYSTEM
+CREDENCIAIS VOD SYNC SYSTEM - PHP 7.4
 ============================================
 INSTALAÇÃO CONCLUÍDA EM: $(date)
 
@@ -1064,6 +1298,7 @@ INSTALAÇÃO CONCLUÍDA EM: $(date)
 🔧 SERVIÇOS:
    Nginx: porta 80
    Backend: porta 8000
+   PHP-FPM: php7.4-fpm (porta 9000)
    MySQL: porta 3306
 
 📁 DIRETÓRIOS:
@@ -1074,15 +1309,77 @@ INSTALAÇÃO CONCLUÍDA EM: $(date)
 
 ⚡ COMANDOS ÚTEIS:
    sudo systemctl status vod-sync-backend
-   sudo journalctl -u vod-sync-backend -f
+   sudo systemctl status php7.4-fpm
    sudo tail -f /var/log/nginx/error.log
 
-⚠️ ALTERE AS SENHAS NO PRIMEIRO ACESSO!
+⚠️ IMPORTANTE:
+   1. Configure sua chave TMDb API em: $BACKEND_DIR/.env
+   2. ALTERE AS SENHAS NO PRIMEIRO ACESSO!
 ============================================
 CREDENTIALS
     
     success "✅ Banco de dados configurado"
     log "📄 Credenciais salvas em: /root/vod-sync-credentials.txt"
+}
+
+# ==================== TESTAR PHP 7.4 ====================
+test_php_74() {
+    log "Testando PHP 7.4..."
+    
+    # Criar arquivo de teste PHP
+    cat > /opt/vod-sync/frontend/public/test-php.php << 'PHP_TEST'
+<?php
+// Teste de compatibilidade PHP 7.4
+echo "<!DOCTYPE html>\n";
+echo "<html>\n";
+echo "<head><title>Teste PHP 7.4</title></head>\n";
+echo "<body style='font-family: Arial, sans-serif; padding: 20px;'>\n";
+echo "<h1>✅ Teste PHP 7.4</h1>\n";
+echo "<p>Versão do PHP: <strong>" . phpversion() . "</strong></p>\n";
+
+// Testar extensões necessárias
+$extensoes = ['pdo', 'pdo_mysql', 'json', 'curl', 'mbstring', 'session'];
+echo "<h3>Extensões PHP:</h3>\n";
+echo "<ul>\n";
+foreach ($extensoes as $ext) {
+    $status = extension_loaded($ext) ? "✅" : "❌";
+    echo "<li>$status $ext</li>\n";
+}
+echo "</ul>\n";
+
+// Testar configurações
+echo "<h3>Configurações:</h3>\n";
+echo "<ul>\n";
+echo "<li>memory_limit: " . ini_get('memory_limit') . "</li>\n";
+echo "<li>upload_max_filesize: " . ini_get('upload_max_filesize') . "</li>\n";
+echo "<li>post_max_size: " . ini_get('post_max_size') . "</li>\n";
+echo "<li>max_execution_time: " . ini_get('max_execution_time') . "</li>\n";
+echo "</ul>\n";
+
+// Testar escrita
+$test_file = '/tmp/php_test_' . time() . '.txt';
+if (file_put_contents($test_file, 'Teste de escrita')) {
+    echo "<p>✅ Escrita no sistema de arquivos: OK</p>\n";
+    unlink($test_file);
+} else {
+    echo "<p>❌ Escrita no sistema de arquivos: FALHOU</p>\n";
+}
+
+// Link para phpinfo
+echo '<p><a href="/phpinfo.php" target="_blank">Ver phpinfo() completo</a></p>';
+echo '<p><a href="/">Voltar para o sistema</a></p>';
+
+echo "</body>\n";
+echo "</html>\n";
+?>
+PHP_TEST
+    
+    # Criar phpinfo
+    cat > /opt/vod-sync/frontend/public/phpinfo.php << 'EOF'
+<?php phpinfo(); ?>
+EOF
+    
+    log "Arquivo de teste criado: http://seu-ip/test-php.php"
 }
 
 # ==================== VERIFICAÇÃO FINAL ====================
@@ -1093,9 +1390,9 @@ verify_installation() {
     
     # Verificar serviços
     echo "📦 STATUS DOS SERVIÇOS:"
-    for service in nginx vod-sync-backend mysql mariadb; do
-        if systemctl list-unit-files | grep -q "^${service}"; then
-            status=$(systemctl is-active "$service" 2>/dev/null || echo "not-found")
+    for service in nginx vod-sync-backend php7.4-fpm php-fpm mysql mariadb; do
+        if systemctl list-unit-files | grep -q "^${service}" 2>/dev/null; then
+            status=$(systemctl is-active "$service" 2>/dev/null || echo "inactive")
             if [ "$status" = "active" ]; then
                 echo "  ✅ $service: ATIVO"
             elif [ "$status" = "activating" ]; then
@@ -1116,18 +1413,18 @@ verify_installation() {
         echo "  ❌ Backend API: NÃO RESPONDE"
     fi
     
-    # Testar Frontend
-    if curl -s --connect-timeout 5 http://localhost >/dev/null; then
-        echo "  ✅ Frontend Web: ACESSÍVEL"
+    # Testar PHP-FPM
+    if netstat -tuln | grep -q ":9000 "; then
+        echo "  ✅ PHP-FPM: RODANDO (porta 9000)"
     else
-        echo "  ❌ Frontend Web: NÃO ACESSÍVEL"
+        echo "  ❌ PHP-FPM: NÃO RODANDO"
     fi
     
-    # Testar MySQL
-    if mysql -e "SELECT 1" >/dev/null 2>&1; then
-        echo "  ✅ MySQL: CONECTADO"
+    # Testar Nginx
+    if netstat -tuln | grep -q ":80 "; then
+        echo "  ✅ Nginx: RODANDO (porta 80)"
     else
-        echo "  ❌ MySQL: SEM CONEXÃO"
+        echo "  ❌ Nginx: NÃO RODANDO"
     fi
     
     echo ""
@@ -1153,14 +1450,15 @@ verify_installation() {
     # Mostrar URLs de acesso
     echo ""
     echo "══════════════════════════════════════════════════════════"
-    echo "🎉 INSTALAÇÃO CONCLUÍDA COM SUCESSO!"
+    echo "🎉 INSTALAÇÃO CONCLUÍDA COM SUCESSO! (PHP 7.4)"
     echo ""
     
     IP_ADDR=$(curl -s ifconfig.me || hostname -I | awk '{print $1}' || echo "localhost")
     
     echo "🌐 ACESSO AO SISTEMA:"
-    echo "   URL: http://$IP_ADDR"
-    echo "   API: http://$IP_ADDR:8000"
+    echo "   URL Principal: http://$IP_ADDR"
+    echo "   Teste PHP: http://$IP_ADDR/test-php.php"
+    echo "   Backend API: http://$IP_ADDR:8000"
     echo ""
     
     echo "🔑 CREDENCIAIS PADRÃO:"
@@ -1173,29 +1471,39 @@ verify_installation() {
     echo "   Log da instalação: $LOG_FILE"
     echo "   Credenciais: /root/vod-sync-credentials.txt"
     echo "   Config Backend: $BACKEND_DIR/.env"
-    echo "   Config Nginx: /etc/nginx/sites-available/vod-sync"
     echo ""
     
     echo "⚡ COMANDOS DE GERENCIAMENTO:"
     echo "   sudo systemctl restart vod-sync-backend"
+    echo "   sudo systemctl restart php7.4-fpm"
     echo "   sudo systemctl restart nginx"
-    echo "   sudo tail -f $BACKEND_DIR/logs/backend.log"
+    echo "   sudo tail -f /var/log/nginx/error.log"
     echo ""
     
     echo "⚠️ PRÓXIMOS PASSOS:"
     echo "   1. Acesse http://$IP_ADDR"
     echo "   2. Faça login com admin/admin123"
-    echo "   3. Configure sua chave TMDb API no painel"
+    echo "   3. Configure chave TMDb API no painel"
     echo "   4. Adicione conexão XUI e lista M3U"
+    echo ""
+    
+    echo "🔧 SE TIVER 502 BAD GATEWAY:"
+    echo "   1. sudo systemctl restart php7.4-fpm"
+    echo "   2. sudo systemctl restart nginx"
+    echo "   3. Teste: http://$IP_ADDR/test-php.php"
     echo ""
     
     echo "══════════════════════════════════════════════════════════"
     
     # Criar flag de instalação
     echo "install_date=$(date '+%Y-%m-%d %H:%M:%S')" > "$BASE_DIR/.installed"
-    echo "version=2.0.0" >> "$BASE_DIR/.installed"
+    echo "version=2.0.0-php74" >> "$BASE_DIR/.installed"
+    echo "php_version=7.4" >> "$BASE_DIR/.installed"
     echo "frontend_url=http://$IP_ADDR" >> "$BASE_DIR/.installed"
     echo "backend_url=http://$IP_ADDR:8000" >> "$BASE_DIR/.installed"
+    
+    # Remover arquivos de teste após 5 minutos
+    (sleep 300 && rm -f /opt/vod-sync/frontend/public/test-php.php /opt/vod-sync/frontend/public/phpinfo.php 2>/dev/null && echo "Arquivos de teste removidos") &
 }
 
 # ==================== INSTALAÇÃO COMPLETA ====================
@@ -1205,11 +1513,10 @@ complete_installation() {
     echo "🔄 Este instalador executará:"
     echo "   1. 📁 Criar estrutura completa de diretórios"
     echo "   2. 🐍 Configurar backend Python (FastAPI)"
-    echo "   3. 🌐 Configurar frontend PHP (Bootstrap)"
+    echo "   3. 🌐 Instalar e configurar PHP 7.4 + Nginx"
     echo "   4. 🗄️  Configurar banco de dados MySQL"
-    echo "   5. 🔧 Configurar Nginx + PHP-FPM"
-    echo "   6. ⚙️  Criar serviços systemd"
-    echo "   7. ✅ Verificar instalação"
+    echo "   5. ⚙️  Criar serviços systemd"
+    echo "   6. ✅ Testar e verificar instalação"
     echo ""
     echo "⏱️  Tempo estimado: 3-5 minutos"
     echo ""
@@ -1222,14 +1529,16 @@ complete_installation() {
     log "Atualizando pacotes do sistema..."
     apt-get update 2>> "$LOG_FILE"
     
-    # Executar passos
+    # Executar passos na ordem correta
     check_root
     create_directory_structure
     create_backend_files
     create_frontend_files
+    install_php_74
     setup_database
     setup_nginx
     setup_backend
+    test_php_74
     verify_installation
     
     log "✅ Instalação completa concluída!"
@@ -1239,14 +1548,14 @@ complete_installation() {
 show_menu() {
     while true; do
         print_header
-        echo "MENU PRINCIPAL"
+        echo "MENU PRINCIPAL - PHP 7.4"
         echo ""
         echo "1) 🚀 Instalação Completa (Recomendado)"
         echo "2) 📁 Apenas Criar Estrutura"
-        echo "3) 🐍 Apenas Configurar Backend"
-        echo "4) 🌐 Apenas Configurar Frontend"
+        echo "3) 🌐 Apenas Instalar PHP 7.4 + Nginx"
+        echo "4) 🐍 Apenas Configurar Backend"
         echo "5) 🗄️  Apenas Configurar Banco de Dados"
-        echo "6) 🔧 Apenas Configurar Nginx"
+        echo "6) 🧪 Testar PHP 7.4"
         echo "7) 🔍 Verificar Sistema"
         echo "8) 🗑️  Desinstalar Tudo"
         echo "9) 🚪 Sair"
@@ -1256,10 +1565,10 @@ show_menu() {
         case $choice in
             1) complete_installation ;;
             2) check_root; create_directory_structure ;;
-            3) check_root; setup_backend ;;
-            4) check_root; create_frontend_files; setup_nginx ;;
+            3) check_root; install_php_74; setup_nginx ;;
+            4) check_root; setup_backend ;;
             5) check_root; setup_database ;;
-            6) check_root; setup_nginx ;;
+            6) check_root; test_php_74 ;;
             7) verify_installation ;;
             8) uninstall_system ;;
             9) echo "Até logo!"; exit 0 ;;
@@ -1292,9 +1601,14 @@ uninstall_system() {
     systemctl stop vod-sync-backend 2>/dev/null || true
     systemctl disable vod-sync-backend 2>/dev/null || true
     
+    # Parar PHP-FPM
+    for service in php7.4-fpm php7.3-fpm php7.2-fpm php-fpm; do
+        systemctl stop $service 2>/dev/null || true
+        systemctl disable $service 2>/dev/null || true
+    done
+    
     # Remover serviços
     rm -f /etc/systemd/system/vod-sync-backend.service
-    rm -f /etc/systemd/system/vod-sync-scheduler.service
     systemctl daemon-reload
     
     # Remover Nginx
@@ -1324,7 +1638,6 @@ uninstall_system() {
     
     # Remover arquivos de credenciais
     rm -f /root/vod-sync-credentials.txt 2>/dev/null || true
-    rm -f /root/vod-db-credentials.txt 2>/dev/null || true
     
     success "✅ Sistema desinstalado com sucesso"
 }
@@ -1342,17 +1655,9 @@ main() {
             echo "Opções:"
             echo "  --auto    Instalação automática não interativa"
             echo "  --help    Mostra esta ajuda"
-            echo "  --fix     Corrigir instalação existente"
             echo ""
             echo "Sem opções: Menu interativo"
             exit 0
-            ;;
-        "--fix")
-            echo "🔧 Modo de correção..."
-            check_root
-            setup_nginx
-            setup_backend
-            verify_installation
             ;;
         *)
             show_menu
