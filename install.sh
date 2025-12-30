@@ -82,7 +82,6 @@ detect_distro() {
     echo $DISTRO
 }
 
-# ==================== INSTALAR PHP 7.4 - VERSÃO CORRIGIDA ====================
 install_php_74() {
     log "Instalando PHP 7.4 (método robusto)..."
     
@@ -93,44 +92,90 @@ install_php_74() {
         return 0
     fi
     
+    # Método 1: Tentar instalar PHP genérico primeiro
+    log "Tentando instalar PHP via apt-get..."
+    
     # Atualizar repositórios
     apt-get update 2>> "$LOG_FILE"
     
-    # Instalar dependências necessárias
-    log "Instalando dependências..."
-    apt-get install -y software-properties-common apt-transport-https lsb-release ca-certificates wget 2>> "$LOG_FILE"
+    # Lista de pacotes PHP para tentar (em ordem de preferência)
+    PHP_PACKAGES=(
+        "php php-fpm php-mysql php-curl php-json php-mbstring php-xml"
+        "php7.4 php7.4-fpm php7.4-mysql php7.4-curl php7.4-json php7.4-mbstring"
+        "php7.3 php7.3-fpm php7.3-mysql php7.3-curl php7.3-json php7.3-mbstring"
+        "php7.2 php7.2-fpm php7.2-mysql php7.2-curl php7.2-json php7.2-mbstring"
+        "php7.0 php7.0-fpm php7.0-mysql php7.0-curl php7.0-json"
+        "php5.6 php5.6-fpm php5.6-mysql"
+    )
     
-    # Adicionar repositório ondrej/php para PHP 7.4
-    log "Adicionando repositório ondrej/php..."
-    add-apt-repository -y ppa:ondrej/php 2>> "$LOG_FILE"
-    apt-get update 2>> "$LOG_FILE"
+    PHP_INSTALLED=0
     
-    # Instalar PHP 7.4 e extensões
-    log "Instalando PHP 7.4 e extensões..."
-    if DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        php7.4 \
-        php7.4-fpm \
-        php7.4-mysql \
-        php7.4-curl \
-        php7.4-gd \
-        php7.4-mbstring \
-        php7.4-xml \
-        php7.4-zip \
-        php7.4-json \
-        php7.4-bcmath \
-        php7.4-dom \
-        php7.4-simplexml \
-        php7.4-tokenizer 2>> "$LOG_FILE"; then
+    for packages in "${PHP_PACKAGES[@]}"; do
+        log "Tentando instalar: $packages"
         
-        success "✅ PHP 7.4 instalado com sucesso"
+        # Tentar instalar sem interação
+        if DEBIAN_FRONTEND=noninteractive apt-get install -y $packages 2>> "$LOG_FILE"; then
+            PHP_INSTALLED=1
+            INSTALLED_PACKAGES=$packages
+            break
+        else
+            log "❌ Falha com $packages, tentando próximo..."
+        fi
+    done
+    
+    # Método 2: Se ainda não instalou, tentar método mais agressivo
+    if [ $PHP_INSTALLED -eq 0 ]; then
+        log "Método padrão falhou. Tentando método alternativo..."
         
-        # Configurar PHP-FPM
-        configure_php_fpm
+        # Adicionar repositório ondrej/php para Ubuntu/Debian
+        apt-get install -y software-properties-common 2>> "$LOG_FILE"
+        add-apt-repository -y ppa:ondrej/php 2>> "$LOG_FILE"
+        apt-get update 2>> "$LOG_FILE"
         
-        return 0
-    else
-        error "❌ Falha ao instalar PHP 7.4"
+        # Tentar novamente com PHP 7.4
+        if DEBIAN_FRONTEND=noninteractive apt-get install -y php7.4 php7.4-fpm php7.4-mysql php7.4-curl php7.4-json php7.4-mbstring 2>> "$LOG_FILE"; then
+            PHP_INSTALLED=1
+            INSTALLED_PACKAGES="php7.4"
+        fi
     fi
+    
+    # Método 3: Se ainda não, tentar apenas php-fpm genérico
+    if [ $PHP_INSTALLED -eq 0 ]; then
+        log "Tentando instalar apenas php-fpm básico..."
+        if apt-get install -y php-fpm php-common 2>> "$LOG_FILE"; then
+            PHP_INSTALLED=1
+            INSTALLED_PACKAGES="php-fpm"
+        fi
+    fi
+    
+    # Verificar se finalmente instalou
+    if [ $PHP_INSTALLED -eq 1 ]; then
+        # Detectar versão instalada
+        if command -v php7.4 &> /dev/null; then
+            PHP_BIN="php7.4"
+        elif command -v php &> /dev/null; then
+            PHP_BIN="php"
+        else
+            # Procurar binário PHP
+            PHP_BIN=$(find /usr/bin -name "php*" -type f -executable | head -1)
+        fi
+        
+        if [ -n "$PHP_BIN" ]; then
+            PHP_VERSION=$($PHP_BIN -v | head -1 | cut -d' ' -f2)
+            success "✅ PHP instalado com sucesso: versão $PHP_VERSION"
+            success "✅ Pacotes: $INSTALLED_PACKAGES"
+        else
+            error "❌ PHP instalado mas binário não encontrado"
+        fi
+    else
+        warning "⚠ Não foi possível instalar PHP via apt. Tentando método manual..."
+        
+        # Método de emergência: baixar e instalar manualmente
+        manual_install_php
+    fi
+    
+    # Configurar PHP-FPM
+    configure_php_fpm
 }
 
 # ==================== CONFIGURAR PHP-FPM - VERSÃO CORRIGIDA ====================
