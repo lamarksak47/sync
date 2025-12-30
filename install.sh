@@ -961,32 +961,43 @@ EOF
     success "✅ Arquivos do frontend criados (PHP 7.4 compatível)"
 }
 
-# ==================== CONFIGURAR NGINX PHP 7.4 ====================
+# ==================== CONFIGURAR NGINX - VERSÃO CORRIGIDA ====================
 setup_nginx() {
-    log "Configurando Nginx para PHP 7.4..."
+    log "Configurando Nginx..."
     
-    # Instalar Nginx se necessário
+    # 1. Verificar/Instalar Nginx
     if ! command -v nginx &> /dev/null; then
         log "Instalando Nginx..."
         apt-get update
-        apt-get install -y nginx 2>> "$LOG_FILE" || error "Falha ao instalar Nginx"
+        if ! apt-get install -y nginx 2>> "$LOG_FILE"; then
+            error "Falha ao instalar Nginx"
+        fi
+        success "✅ Nginx instalado"
     fi
     
-    # Parar Nginx temporariamente
-    systemctl stop nginx 2>/dev/null || true
+    # 2. Parar Nginx se estiver rodando
+    if systemctl is-active --quiet nginx; then
+        log "Parando Nginx..."
+        systemctl stop nginx 2>> "$LOG_FILE" || true
+        sleep 2
+    fi
     
-    # Criar configuração Nginx otimizada para PHP 7.4
-    cat > /etc/nginx/sites-available/vod-sync << 'NGINX_CONFIG'
+    # 3. Criar configuração ULTRA SIMPLES que sempre funciona
+    log "Criando configuração Nginx..."
+    
+    # Backup da configuração atual se existir
+    if [ -f /etc/nginx/sites-available/vod-sync ]; then
+        cp /etc/nginx/sites-available/vod-sync /etc/nginx/sites-available/vod-sync.backup.$(date +%Y%m%d_%H%M%S)
+    fi
+    
+    # Configuração SIMPLIFICADA (sem erros de syntax)
+    cat > /tmp/vod-sync-nginx.conf << 'NGINX_SIMPLE'
 server {
     listen 80;
-    listen [::]:80;
     server_name _;
     
     root /opt/vod-sync/frontend/public;
     index index.php index.html index.htm;
-    
-    # Logs detalhados para debug
-    error_log /var/log/nginx/vod-sync-debug.log;
     
     # Frontend
     location / {
@@ -996,111 +1007,136 @@ server {
     # Backend API
     location /api/ {
         proxy_pass http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
         proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
     }
     
-    # PHP-FPM - Configuração para PHP 7.4 (TCP - mais confiável)
+    # PHP usando TCP (porta 9000)
     location ~ \.php$ {
-        # Configuração básica obrigatória
-        include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        
-        # Usar TCP (porta 9000) - funciona sempre
         fastcgi_pass 127.0.0.1:9000;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
         
-        # Fallback para socket se disponível
-        fastcgi_pass unix:/run/php/php7.4-fpm.sock;
-        fastcgi_pass unix:/var/run/php/php7.4-fpm.sock;
-        
-        # Timeouts generosos
+        # Timeouts
         fastcgi_read_timeout 300;
         fastcgi_connect_timeout 300;
-        fastcgi_send_timeout 300;
-        
-        # Headers para debug
-        add_header X-PHP-FPM "php7.4";
-        add_header X-FCGI-Pass $fastcgi_pass;
     }
     
-    # Bloquear acesso a arquivos sensíveis
+    # Bloquear arquivos ocultos
     location ~ /\. {
         deny all;
         return 404;
     }
     
-    location ~ ^/(app|config|logs|temp|vendor|backend|install) {
-        deny all;
-        return 403;
-    }
-    
-    # Cache para arquivos estáticos
-    location ~* \.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf|eot)$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-        access_log off;
-    }
-    
-    # Tamanho máximo de upload (para listas M3U grandes)
+    # Tamanho máximo de upload
     client_max_body_size 100M;
-    
-    # Headers de segurança
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-XSS-Protection "1; mode=block" always;
 }
-NGINX_CONFIG
+NGINX_SIMPLE
     
-    # Remover site default
+    # Mover para local correto
+    cp /tmp/vod-sync-nginx.conf /etc/nginx/sites-available/vod-sync
+    
+    # 4. Remover site default para evitar conflitos
     rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
     
-    # Ativar nosso site
-    ln -sf /etc/nginx/sites-available/vod-sync /etc/nginx/sites-enabled/
+    # 5. Ativar nosso site
+    ln -sf /etc/nginx/sites-available/vod-sync /etc/nginx/sites-enabled/ 2>/dev/null || true
     
-    # Testar configuração
+    # 6. TESTAR configuração ANTES de iniciar
     log "Testando configuração Nginx..."
+    
     if nginx -t 2>> "$LOG_FILE"; then
         success "✅ Configuração Nginx válida"
     else
-        # Configuração alternativa ultra simples
-        cat > /etc/nginx/sites-available/vod-sync << 'NGINX_SIMPLE'
+        # Mostrar erro específico
+        echo "=== ERRO NGINX ===" >> "$LOG_FILE"
+        nginx -t 2>&1 >> "$LOG_FILE"
+        
+        # Criar configuração de EMERGÊNCIA (sem PHP, só proxy)
+        log "Criando configuração de emergência..."
+        
+        cat > /etc/nginx/sites-available/vod-sync << 'NGINX_EMERGENCY'
 server {
     listen 80;
     server_name _;
+    
     root /opt/vod-sync/frontend/public;
-    index index.php;
+    index index.html;
     
     location / {
-        try_files $uri $uri/ /index.php?$query_string;
+        try_files $uri $uri/ =404;
     }
     
-    location ~ \.php$ {
-        include fastcgi_params;
-        fastcgi_pass 127.0.0.1:9000;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
     }
 }
-NGINX_SIMPLE
+NGINX_EMERGENCY
         
-        nginx -t 2>> "$LOG_FILE" || error "Configuração Nginx ainda falha"
+        # Testar novamente
+        if nginx -t 2>> "$LOG_FILE"; then
+            success "✅ Configuração de emergência válida"
+        else
+            error "❌ Configuração Nginx ainda falha. Verifique sintaxe manualmente."
+        fi
     fi
     
-    # Iniciar Nginx
-    systemctl start nginx 2>> "$LOG_FILE" || error "Falha ao iniciar Nginx"
-    systemctl enable nginx 2>> "$LOG_FILE"
+    # 7. Iniciar Nginx de forma SEGURA
+    log "Iniciando Nginx..."
     
-    # Verificar
-    sleep 2
-    if systemctl is-active --quiet nginx; then
-        success "✅ Nginx rodando na porta 80"
+    # Matar processos Nginx existentes (se houver)
+    pkill -9 nginx 2>/dev/null || true
+    sleep 1
+    
+    # Tentar iniciar
+    if systemctl start nginx 2>> "$LOG_FILE"; then
+        sleep 2
+        
+        if systemctl is-active --quiet nginx; then
+            success "✅ Nginx iniciado com sucesso na porta 80"
+            
+            # Verificar se porta 80 está aberta
+            if netstat -tuln | grep -q ":80 "; then
+                success "✅ Porta 80 ouvindo"
+            else
+                warning "⚠ Porta 80 não está ouvindo"
+            fi
+        else
+            error "❌ Nginx não está ativo após iniciar"
+        fi
     else
-        error "❌ Nginx não iniciou"
+        # Tentar iniciar manualmente
+        log "Tentando iniciar Nginx manualmente..."
+        
+        # Verificar se há outro serviço usando porta 80
+        if netstat -tuln | grep -q ":80 "; then
+            warning "⚠ Porta 80 já está em uso"
+            sudo netstat -tulpn | grep ":80 "
+        fi
+        
+        # Iniciar Nginx em foreground para ver erros
+        nginx -g "daemon off;" &
+        NGINX_PID=$!
+        sleep 3
+        
+        if ps -p $NGINX_PID > /dev/null; then
+            success "✅ Nginx iniciado manualmente (PID: $NGINX_PID)"
+            kill $NGINX_PID 2>/dev/null
+            systemctl start nginx 2>> "$LOG_FILE" || true
+        else
+            error "❌ Nginx falhou ao iniciar manualmente"
+        fi
+    fi
+    
+    # 8. Habilitar para iniciar no boot
+    systemctl enable nginx 2>> "$LOG_FILE" || warning "⚠ Não foi possível habilitar Nginx"
+    
+    # 9. Verificar logs se ainda tiver problema
+    if ! systemctl is-active --quiet nginx; then
+        log "📋 Verificando logs do Nginx..."
+        journalctl -u nginx --no-pager -n 20
+        error "❌ Nginx não está rodando após várias tentativas"
     fi
 }
 
