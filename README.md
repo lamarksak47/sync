@@ -18,9 +18,9 @@ Sistema completo para sincronização e gerenciamento de catálogos VODs com pai
 ```bash
 wget https://raw.githubusercontent.com/lamarksak47/sync/main/install.sh && chmod +x install.sh && sudo ./install.sh
 
-APOS INSTALAÇÃO CONFIGURA CONEXÃO COM DB DO XUI 
+APOS INSTALAÇÃO FIX ERRO 502 NA PAGINA
 ```bash
-wget https://raw.githubusercontent.com/lamarksak47/sync/main/db.sh && chmod +x db.sh && sudo ./db.sh
+wget https://raw.githubusercontent.com/lamarksak47/sync/main/fix502.sh && chmod +x fix502.sh && sudo ./fix502.sh
 
 
 2. **Baixe o desistalador:**
